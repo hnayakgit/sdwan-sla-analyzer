@@ -91,6 +91,16 @@ class RawEventRecord:
 
 
 @dataclass
+class ObservedAppEntry:
+    application: str
+    family: str
+    mapped_queue: str
+    volume_mb: float
+    packets: int
+    vpn_id: str
+
+
+@dataclass
 class AnalysisResult:
     device_hostname: str
     system_ip: str
@@ -117,6 +127,7 @@ class AnalysisResult:
     tunnel_metrics: Dict[Tuple[str, str], List[dict]]
 
     app_failovers: List[AppFailoverEntry]
+    observed_dpi_apps: List[ObservedAppEntry]
     raw_events: List[RawEventRecord]
 
     # Verdict & KPIs
@@ -417,6 +428,7 @@ def analyze_sla_data(
     aar_policy_defs: Optional[List[dict]] = None,
     data_prefix_lists: Optional[Dict[str, Tuple[str, List[str]]]] = None,
     sla_class_lists: Optional[Dict[str, str]] = None,
+    dpi_stats_raw: Optional[List[dict]] = None,
 ) -> AnalysisResult:
     # Align start_est down to nearest 15-min boundary for clean buckets
     start_est = start_utc.astimezone(EST_TZ)
@@ -727,6 +739,74 @@ def analyze_sla_data(
     for r in aar_rules:
         rules_by_sla[r.sla_class].append(r)
 
+    # 5a. Process Read-Only vManage DPI Observed Applications (outlook, webex, akamai, etc.)
+    dscp_to_queue: Dict[str, str] = {}
+    app_to_queue: Dict[str, str] = {}
+    for r in aar_rules:
+        for d in r.dscp_values:
+            dscp_to_queue.setdefault(str(d), r.sla_class)
+        for a in r.apps:
+            app_to_queue.setdefault(a.lower(), r.sla_class)
+
+    # Collect all breach time windows on primary_hub_ip so we prioritize apps active during breaches
+    all_breach_windows: List[Tuple[float, float]] = []
+    for (c, rip, q), ivs in breach_intervals.items():
+        if rip == primary_hub_ip:
+            all_breach_windows.extend(ivs)
+
+    def _in_breach_window(ep: float) -> bool:
+        if not all_breach_windows:
+            return True
+        return any(t0 - 300 <= ep <= t1 + 300 for t0, t1 in all_breach_windows)
+
+    dpi_agg: Dict[str, dict] = {}
+    dpi_apps_by_queue: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+    for rec in dpi_stats_raw or []:
+        app_name = rec.get("application") or rec.get("app")
+        if not app_name or str(app_name).lower() in ("unknown", "none", ""):
+            continue
+        entry_ms = rec.get("entry_time") or rec.get("statcycletime") or 0
+        ep = float(entry_ms) / 1000.0 if entry_ms else 0.0
+        if ep and (ep < window_start_epoch or ep > window_end_epoch):
+            continue
+        if ep and not _in_breach_window(ep):
+            continue
+
+        octets = float(rec.get("octets", 0) or 0)
+        pkts = int(rec.get("packets", 0) or 0)
+        fam = str(rec.get("family", "other") or "other")
+        vpn = str(rec.get("vpn_id", "-") or "-")
+        dscp_val = rec.get("dscp")
+
+        mapped_q = app_to_queue.get(str(app_name).lower(), "")
+        if not mapped_q and dscp_val is not None:
+            mapped_q = dscp_to_queue.get(str(dscp_val), "")
+
+        key = str(app_name)
+        if key not in dpi_agg:
+            dpi_agg[key] = {"family": fam, "octets": 0.0, "packets": 0, "vpn": vpn, "queue": mapped_q}
+        dpi_agg[key]["octets"] += octets
+        dpi_agg[key]["packets"] += pkts
+        if mapped_q and not dpi_agg[key]["queue"]:
+            dpi_agg[key]["queue"] = mapped_q
+
+    observed_dpi_apps: List[ObservedAppEntry] = []
+    for app_name, info in sorted(dpi_agg.items(), key=lambda x: -x[1]["octets"])[:25]:
+        vol_mb = round(info["octets"] / (1024.0 * 1024.0), 2)
+        q_label = info["queue"] or "Observed via DPI"
+        observed_dpi_apps.append(
+            ObservedAppEntry(
+                application=app_name,
+                family=info["family"],
+                mapped_queue=q_label,
+                volume_mb=vol_mb,
+                packets=info["packets"],
+                vpn_id=info["vpn"],
+            )
+        )
+        if info["queue"]:
+            dpi_apps_by_queue[info["queue"]].append((app_name, vol_mb))
+
     app_failovers: List[AppFailoverEntry] = []
     for (c, rip, q), intervals in breach_intervals.items():
         if not intervals or rip != primary_hub_ip:
@@ -769,6 +849,10 @@ def analyze_sla_data(
             if r.app_list and not r.app_list.startswith("DSCP("):
                 all_lists.append(r.app_list)
 
+        # Enrich with real DPI application names mapped to this queue
+        for dpi_app, _ in dpi_apps_by_queue.get(q, []):
+            all_apps.append(dpi_app)
+
         uniq_apps = list(dict.fromkeys(all_apps))
         uniq_dscps = list(dict.fromkeys(all_dscps))
         uniq_ips = list(dict.fromkeys(all_ips))
@@ -779,7 +863,7 @@ def analyze_sla_data(
             app_display = ", ".join(uniq_apps[:10]) + (f" (+{len(uniq_apps) - 10} more)" if len(uniq_apps) > 10 else "")
             if uniq_dscps:
                 app_display += f" | {_classify_dscp_traffic(uniq_dscps)}"
-            match_ref = ", ".join(uniq_lists[:3]) if uniq_lists else "AAR App-List"
+            match_ref = ", ".join(uniq_lists[:3]) if uniq_lists else "AAR Policy + DPI"
         elif uniq_ips:
             app_display = f"IP Prefixes: {', '.join(uniq_ips[:5])}"
             match_ref = ", ".join(uniq_lists[:3]) if uniq_lists else "Data-Prefix-List"
@@ -905,6 +989,7 @@ def analyze_sla_data(
         total_out_mins=total_out_mins,
         tunnel_metrics=tunnel_metrics,
         app_failovers=app_failovers,
+        observed_dpi_apps=observed_dpi_apps,
         raw_events=raw_event_records,
         verdict_level=verdict_level,
         verdict_title=verdict_title,

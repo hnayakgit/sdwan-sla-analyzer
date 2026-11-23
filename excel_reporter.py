@@ -597,6 +597,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         app_chart.y_axis.title.overlay = False
         app_chart.y_axis.majorGridlines = None
         ws4.add_chart(app_chart, f"A{app_end_row + 3}")
+        dpi_section_row = app_end_row + 29
     else:
         ws4.merge_cells("A4:J4")
         ws4["A4"] = "No application failover events occurred during the selected EST time window."
@@ -604,6 +605,37 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         ws4["A4"].fill = green_fill
         ws4["A4"].alignment = Alignment(horizontal="center", vertical="center")
         ws4.row_dimensions[4].height = 28
+        dpi_section_row = 7
+
+    # Section 2 on Tab 4: Real Observed Application Names from vManage DPI during Breach Window
+    ws4.cell(dpi_section_row, 1, "Top Observed Applications Active on Device During SLA Breach Window (from vManage DPI)").font = section_font
+    ws4.row_dimensions[dpi_section_row].height = 24
+    dpi_headers = ["Application Name", "Application Family", "Mapped Queue (SLA)", "Traffic Volume (MB)", "Packets", "VPN ID"]
+    for c, h in enumerate(dpi_headers, start=1):
+        ws4.cell(dpi_section_row + 1, c, h)
+    _style_table_header(ws4, dpi_section_row + 1, 1, len(dpi_headers), height=26)
+
+    if result.observed_dpi_apps:
+        for idx_d, d_app in enumerate(result.observed_dpi_apps, start=dpi_section_row + 2):
+            ws4.row_dimensions[idx_d].height = 20
+            d_vals = [d_app.application, d_app.family, d_app.mapped_queue, d_app.volume_mb, d_app.packets, d_app.vpn_id]
+            for c, v in enumerate(d_vals, start=1):
+                cell = ws4.cell(idx_d, c, v)
+                cell.font = bold_font if c == 1 else regular_font
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal="left" if c in (1, 2) else "center", vertical="center")
+                if c == 4:
+                    cell.number_format = "0.00"
+                elif c == 5:
+                    cell.number_format = "#,##0"
+                cell.fill = zebra_fill if idx_d % 2 == 0 else white_fill
+    else:
+        ws4.merge_cells(start_row=dpi_section_row + 2, start_column=1, end_row=dpi_section_row + 2, end_column=6)
+        ws4.cell(
+            dpi_section_row + 2, 1,
+            "vManage DPI returned 0 application records for this device/window (DPI may be disabled on this cEdge)."
+        ).font = Font(name="Calibri", size=10, italic=True, color=MUTED_TXT)
+        ws4.row_dimensions[dpi_section_row + 2].height = 22
 
     col_widths_4 = [18, 44, 22, 16, 18, 25, 25, 16, 19, 15]
     for c_idx, w in enumerate(col_widths_4, start=1):

@@ -140,6 +140,16 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
     else:
         app_rows_html = '<tr><td colspan="9" style="text-align:center;color:#107C10;font-weight:600;">No application failovers detected.</td></tr>'
 
+    # DPI Observed Applications Table Rows
+    if result.observed_dpi_apps:
+        dpi_rows_html = "".join(
+            f"<tr><td><b>{_esc(d.application)}</b></td><td>{_esc(d.family)}</td><td>{_esc(d.mapped_queue)}</td>"
+            f"<td>{d.volume_mb:.2f} MB</td><td>{d.packets:,}</td><td>{_esc(d.vpn_id)}</td></tr>"
+            for d in result.observed_dpi_apps
+        )
+    else:
+        dpi_rows_html = '<tr><td colspan="6" style="text-align:center;color:#57606A;">vManage DPI returned 0 application records for this device/window.</td></tr>'
+
     # Raw Events Table Rows
     if result.raw_events:
         ev_rows_html = "".join(
@@ -215,6 +225,16 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
         <table>
           <thead><tr><th>Queue (SLA)</th><th>Affected Applications / Traffic</th><th>Match Reference</th><th>Preferred</th><th>Moved To</th><th>Start (EST)</th><th>End (EST)</th><th>Duration</th><th>Count</th></tr></thead>
           <tbody>{app_rows_html}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Top Observed Applications Active During SLA Breach Window (vManage DPI)</h3>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Application Name</th><th>Family</th><th>Mapped Queue</th><th>Volume (MB)</th><th>Packets</th><th>VPN ID</th></tr></thead>
+          <tbody>{dpi_rows_html}</tbody>
         </table>
       </div>
     </div>

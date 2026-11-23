@@ -169,8 +169,9 @@ def main():
         data_prefix_lists = client.get_data_prefix_lists()
         sla_class_lists = client.get_sla_class_lists()
         aar_policy_defs = client.get_aar_policy_definitions()
+        dpi_stats = client.get_dpi_app_stats(device_ip, start_utc, end_utc)
 
-        print(f"[+] Retrieved {len(events_raw)} SLA/BFD events, {len(approute_stats)} approute samples, and {len(aar_policy_defs)} AAR policy definition(s). Processing 15-min EST buckets...")
+        print(f"[+] Retrieved {len(events_raw)} SLA/BFD events, {len(approute_stats)} approute samples, {len(aar_policy_defs)} AAR policy def(s), and {len(dpi_stats)} DPI app record(s). Processing 15-min EST buckets...")
         result = analyze_sla_data(
             vmanage_host=vmanage_ip,
             device_info=device_info,
@@ -186,6 +187,7 @@ def main():
             aar_policy_defs=aar_policy_defs,
             data_prefix_lists=data_prefix_lists,
             sla_class_lists=sla_class_lists,
+            dpi_stats_raw=dpi_stats,
         )
         _write_outputs_and_print(result)
 
