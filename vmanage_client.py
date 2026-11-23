@@ -303,37 +303,62 @@ class VManageClient:
         return all_stats
 
     def get_dpi_app_stats(
-        self, system_ip: str, start_utc: datetime, end_utc: datetime
+        self, system_ip: str, start_utc: datetime, end_utc: datetime, hostname: str = ""
     ) -> List[dict]:
         """
-        Read-only fetch of vManage DPI observed application flows strictly for system_ip,
-        chunked by 24h. Gracefully returns [] if DPI is disabled on the device.
+        Read-only fetch of vManage SAIE / DPI observed application flows strictly for system_ip.
+        Tries historical /statistics/dpi (with multiple vManage 20.x field names),
+        then /statistics/dpi/applications/summary, then real-time /device/dpi/applications & /device/dpi/flows.
         """
-        all_dpi: List[dict] = []
-        for win_start, win_end in self._chunk_time_windows(start_utc, end_utc, chunk_hours=24):
-            payload = {
-                "query": {
-                    "condition": "AND",
-                    "rules": [
-                        {
-                            "field": "entry_time",
-                            "operator": "between",
-                            "type": "date",
-                            "value": [self._fmt_vmanage_utc(win_start), self._fmt_vmanage_utc(win_end)],
-                        },
-                        {
-                            "field": "vdevice_name",
-                            "operator": "in",
-                            "type": "string",
-                            "value": [system_ip],
-                        },
-                    ],
-                },
-                "size": 10000,
-            }
+        # 1. Try historical /statistics/dpi across vManage field-name variants
+        field_candidates = [("vdevice_name", system_ip), ("device_ip", system_ip), ("system_ip", system_ip)]
+        if hostname:
+            field_candidates.append(("host_name", hostname))
+
+        for field_name, field_val in field_candidates:
+            all_dpi: List[dict] = []
+            for win_start, win_end in self._chunk_time_windows(start_utc, end_utc, chunk_hours=24):
+                payload = {
+                    "query": {
+                        "condition": "AND",
+                        "rules": [
+                            {
+                                "field": "entry_time",
+                                "operator": "between",
+                                "type": "date",
+                                "value": [self._fmt_vmanage_utc(win_start), self._fmt_vmanage_utc(win_end)],
+                            },
+                            {
+                                "field": field_name,
+                                "operator": "in",
+                                "type": "string",
+                                "value": [field_val],
+                            },
+                        ],
+                    },
+                    "size": 10000,
+                }
+                try:
+                    resp = self.post("/statistics/dpi", payload)
+                    all_dpi.extend(resp.get("data", []))
+                except Exception:
+                    break
+            if all_dpi:
+                return all_dpi
+
+        # 2. Try vManage SAIE / DPI summary & real-time device endpoints (100% read-only GET)
+        get_endpoints = [
+            f"/statistics/dpi/applications/summary?deviceId={system_ip}",
+            f"/device/dpi/applications?deviceId={system_ip}",
+            f"/device/dpi/flows?deviceId={system_ip}",
+        ]
+        for ep in get_endpoints:
             try:
-                resp = self.post("/statistics/dpi", payload)
-                all_dpi.extend(resp.get("data", []))
+                resp = self.get(ep)
+                rows = resp if isinstance(resp, list) else resp.get("data", [])
+                if rows:
+                    return rows
             except Exception:
-                pass
-        return all_dpi
+                continue
+
+        return []

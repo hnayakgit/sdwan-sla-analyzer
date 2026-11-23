@@ -205,23 +205,19 @@ def _resolve_app_list(app_lists: dict, key: str) -> Tuple[str, List[str]]:
 
 
 def _classify_dscp_traffic(dscp_nums: List[str]) -> str:
-    """Friendly traffic class summary for DSCP-only queues (when no app-list is configured)."""
+    """Short, executive-friendly traffic label for DSCP-only queues."""
     s = set(dscp_nums)
-    tags = []
     if s & {"46", "40", "48"}:
-        tags.append("Voice / Real-Time")
-    if s & {"32", "34", "36", "38"}:
-        tags.append("Interactive Video")
-    if s & {"24", "26", "28", "30"}:
-        tags.append("Call-Signaling / Critical Data")
-    if s & {"16", "18", "20", "22"}:
-        tags.append("Transactional / Business Data")
-    if s & {"8", "10", "12", "14"}:
-        tags.append("Bulk / Low-Priority Data")
-    if "0" in s:
-        tags.append("Best-Effort / Default")
+        label = "Voice & Real-Time Video"
+    elif s & {"32", "34", "36", "38", "24", "26", "18", "16"}:
+        label = "Business-Critical Apps"
+    elif s & {"8", "10", "12", "14"}:
+        label = "Bulk / Low-Priority Data"
+    elif "0" in s:
+        label = "Best-Effort / Default Traffic"
+    else:
+        label = "DSCP-Matched Traffic"
     dscp_str = ", ".join(sorted(s, key=lambda x: int(x) if x.isdigit() else 999))
-    label = " / ".join(tags) if tags else "DSCP-Matched Traffic"
     return f"{label} (DSCP: {dscp_str})"
 
 
@@ -762,20 +758,26 @@ def analyze_sla_data(
     dpi_agg: Dict[str, dict] = {}
     dpi_apps_by_queue: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
     for rec in dpi_stats_raw or []:
-        app_name = rec.get("application") or rec.get("app")
+        app_name = (
+            rec.get("application")
+            or rec.get("app")
+            or rec.get("app-name")
+            or rec.get("name")
+        )
         if not app_name or str(app_name).lower() in ("unknown", "none", ""):
             continue
         entry_ms = rec.get("entry_time") or rec.get("statcycletime") or 0
         ep = float(entry_ms) / 1000.0 if entry_ms else 0.0
+        # Real-time /device/dpi/applications records have no entry_time (ep == 0) — always keep them!
         if ep and (ep < window_start_epoch or ep > window_end_epoch):
             continue
         if ep and not _in_breach_window(ep):
             continue
 
-        octets = float(rec.get("octets", 0) or 0)
-        pkts = int(rec.get("packets", 0) or 0)
-        fam = str(rec.get("family", "other") or "other")
-        vpn = str(rec.get("vpn_id", "-") or "-")
+        octets = float(rec.get("octets") or rec.get("bytes") or rec.get("total-octets") or 0)
+        pkts = int(rec.get("packets") or rec.get("total-packets") or 0)
+        fam = str(rec.get("family") or rec.get("app-family") or "other")
+        vpn = str(rec.get("vpn_id") or rec.get("vpn-id") or "-")
         dscp_val = rec.get("dscp")
 
         mapped_q = app_to_queue.get(str(app_name).lower(), "")
