@@ -407,9 +407,8 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     jit_limit = strict_sla.jitter if strict_sla else 20.0
     strict_name = strict_sla.name if strict_sla else "SLA"
 
-    # Two top queues for SLA Outage Timeline chart on Tab 1
-    q1_name = sla_names[0] if len(sla_names) >= 1 else "Default"
-    q2_name = sla_names[1] if len(sla_names) >= 2 else None
+    # Dynamically plot ALL SLA queues (up to 6) so Queue0, Queue1, Queue2, Queue7 all appear on the Executive Summary chart!
+    chart_queues = sla_names[:6] if sla_names else ["Default"]
 
     bk_label = backup_color if backup_color else "Backup"
     headers3 = [
@@ -424,10 +423,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         f"{strict_name} Loss Limit (%)",
         f"{strict_name} Latency Limit (ms)",
         f"{strict_name} Jitter Limit (ms)",
-        f"{primary_color} {q1_name} Outage (%)",
-    ]
-    if q2_name:
-        headers3.append(f"{primary_color} {q2_name} Outage (%)")
+    ] + [f"{primary_color} {q} Outage (%)" for q in chart_queues]
 
     last_m_letter = get_column_letter(len(headers3))
     ws3.merge_cells(f"A1:{last_m_letter}1")
@@ -443,8 +439,10 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
 
     p_metrics = result.tunnel_metrics.get((primary_color, result.primary_hub_ip), [])
     b_metrics = result.tunnel_metrics.get((backup_color, result.primary_hub_ip), []) if backup_color else []
-    q1_pcts = result.heatmap_pct.get((primary_color, result.primary_hub_ip, q1_name), [0.0] * num_buckets)
-    q2_pcts = result.heatmap_pct.get((primary_color, result.primary_hub_ip, q2_name), [0.0] * num_buckets) if q2_name else []
+    queue_pcts_map = {
+        q: result.heatmap_pct.get((primary_color, result.primary_hub_ip, q), [0.0] * num_buckets)
+        for q in chart_queues
+    }
 
     max_lat_seen = lat_limit
     max_jit_seen = jit_limit
@@ -463,10 +461,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
             pm["avg_latency"], bm["avg_latency"],
             pm["avg_jitter"], bm["avg_jitter"],
             loss_limit, lat_limit, jit_limit,
-            q1_pcts[i],
-        ]
-        if q2_name:
-            vals.append(q2_pcts[i])
+        ] + [queue_pcts_map[q][i] for q in chart_queues]
 
         for c, v in enumerate(vals, start=1):
             cell = ws3.cell(r, c, v)
@@ -475,7 +470,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
             cell.alignment = Alignment(horizontal="center", vertical="center")
             if c in (2, 3, 4, 9):
                 cell.number_format = '0.0"%"'
-            elif c in (12, 13):
+            elif c >= 12:
                 cell.number_format = '0"%"'
             cell.fill = zebra_fill if r % 2 == 0 else white_fill
 
@@ -490,7 +485,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     for c_idx in range(1, len(headers3) + 1):
         ws3.column_dimensions[get_column_letter(c_idx)].width = 20 if c_idx > 1 else 14
 
-    # TAB 1 CHART: SLA Outage Timeline Over Time (EST) — placed safely below summary tables
+    # TAB 1 CHART: SLA Outage Timeline Over Time (EST) — includes ALL breached/active SLA queues!
     chart1_row = max(24, 19 + max(len(display_tunnels), len(snap_rows)) + 2)
     exec_sla_chart = BarChart()
     exec_sla_chart.type = "col"
@@ -498,12 +493,12 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     exec_sla_chart.title = f"SLA Outage Timeline Over Time (EST) — % Out-of-SLA per Queue (Hub {result.primary_hub_ip})"
     exec_sla_chart.y_axis.scaling.min = 0
     exec_sla_chart.y_axis.scaling.max = 100
-    max_q_col = 13 if q2_name else 12
+    max_q_col = 11 + len(chart_queues)
     exec_sla_chart.add_data(Reference(ws3, min_col=12, min_row=3, max_col=max_q_col, max_row=last_data_row), titles_from_data=True)
     exec_sla_chart.set_categories(Reference(ws3, min_col=1, min_row=4, max_row=last_data_row))
-    exec_sla_chart.series[0].graphicalProperties.solidFill = "D93025"
-    if q2_name and len(exec_sla_chart.series) > 1:
-        exec_sla_chart.series[1].graphicalProperties.solidFill = "E67C00"
+    queue_palette = ["D93025", "E67C00", "005073", "7B1FA2", "007A87", "2E7D32"]
+    for idx_s, s in enumerate(exec_sla_chart.series):
+        s.graphicalProperties.solidFill = queue_palette[idx_s % len(queue_palette)]
     _configure_time_chart(exec_sla_chart, y_title="% Time Out of SLA", tick_skip=tick_skip, show_legend=True)
     ws1.add_chart(exec_sla_chart, f"A{chart1_row}")
 
