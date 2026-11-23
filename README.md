@@ -105,6 +105,7 @@ output/<hostname>_<system-ip>_<YYYYMMDD_HHMMSS_EST>/
 | **3. 15min Tunnel Metrics** | Actual 15-minute Avg/Max **Packet Loss %**, **Latency (ms)**, and **Jitter (ms)** from vManage `approute` stats with red SLA breach highlighting and Latency/Jitter trend charts. |
 | **4. App Failover Summary** | Correlates the device's AAR policy with `sla-change` events to list which **Applications / App-Lists** moved from primary to backup transport, exact EST start/end times, and total duration. |
 | **5. Raw SLA & BFD Events** | Filterable chronological audit log of every `sla-change` and `bfd-state-change` event in EST. |
+| **6. WAN Utilization & Errors** | 15-minute VPN 0 WAN interface Tx/Rx Mbps, link utilization %, interface errors & drops, and automated diagnosis distinguishing **ISP/Carrier Transport Issue** vs. **High Utilization/Congestion** vs. **Local Link Errors**. |
 
 ---
 

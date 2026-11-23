@@ -362,3 +362,55 @@ class VManageClient:
                 continue
 
         return []
+
+    def get_wan_interfaces(self, system_ip: str) -> List[dict]:
+        """Read-only fetch of VPN 0 (transport/WAN) interfaces & speeds for target system_ip."""
+        try:
+            rows = self.get(f"/device/interface?deviceId={system_ip}").get("data", [])
+            wan_rows = [
+                r for r in rows
+                if str(r.get("vpn-id", "")).strip() == "0"
+                and not str(r.get("ifname", "")).lower().startswith(("loopback", "system", "tunnel"))
+            ]
+            return wan_rows if wan_rows else rows
+        except Exception:
+            return []
+
+    def get_interface_stats(
+        self, system_ip: str, start_utc: datetime, end_utc: datetime
+    ) -> List[dict]:
+        """
+        Read-only fetch of 15-min WAN interface utilization (tx_kbps/rx_kbps) and
+        errors/drops (rx_errors/tx_errors/rx_drops/tx_drops) strictly for system_ip.
+        """
+        for field_name in ("vdevice_name", "device_ip", "system_ip"):
+            all_if_stats: List[dict] = []
+            for win_start, win_end in self._chunk_time_windows(start_utc, end_utc, chunk_hours=24):
+                payload = {
+                    "query": {
+                        "condition": "AND",
+                        "rules": [
+                            {
+                                "field": "entry_time",
+                                "operator": "between",
+                                "type": "date",
+                                "value": [self._fmt_vmanage_utc(win_start), self._fmt_vmanage_utc(win_end)],
+                            },
+                            {
+                                "field": field_name,
+                                "operator": "in",
+                                "type": "string",
+                                "value": [system_ip],
+                            },
+                        ],
+                    },
+                    "size": 10000,
+                }
+                try:
+                    resp = self.post("/statistics/interface", payload)
+                    all_if_stats.extend(resp.get("data", []))
+                except Exception:
+                    break
+            if all_if_stats:
+                return all_if_stats
+        return []

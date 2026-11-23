@@ -112,9 +112,42 @@ def get_demo_payloads(hours: int = 4):
     ]
 
     app_lists = {
-        "Voice-Apps": ["Webex", "Cisco-Jabber", "MS-Teams"],
-        "Biz-Apps": ["SAP", "Salesforce"],
+        "Voice-Apps": ("Voice-Apps", ["Webex", "Cisco-Jabber", "MS-Teams"]),
+        "Biz-Apps": ("Biz-Apps", ["SAP", "Salesforce"]),
     }
+
+    dpi_stats = [
+        {"application": "webex-meeting", "family": "audio_video", "octets": 48 * 1024 * 1024, "packets": 42000, "vpn_id": "10", "dscp": "46"},
+        {"application": "ms-outlook", "family": "mail", "octets": 32 * 1024 * 1024, "packets": 28500, "vpn_id": "10", "dscp": "18"},
+        {"application": "akamai", "family": "web", "octets": 19 * 1024 * 1024, "packets": 15200, "vpn_id": "10", "dscp": "0"},
+    ]
+
+    wan_interfaces_raw = [
+        {"ifname": "GigabitEthernet0/0/0", "vpn-id": "0", "speed-mbps": "100", "color": "mpls"},
+        {"ifname": "GigabitEthernet0/0/1", "vpn-id": "0", "speed-mbps": "500", "color": "biz-internet"},
+    ]
+
+    interface_stats_raw = []
+    cursor = start_est
+    while cursor < now_est:
+        ms = int(cursor.astimezone(timezone.utc).timestamp() * 1000)
+        in_inc = incident_start <= cursor <= incident_end
+        # Demo simulates an ISP/Carrier MPLS issue (low utilization 28 Mbps on 100M link, 0 errors/drops)
+        interface_stats_raw.append({
+            "entry_time": ms,
+            "interface": "GigabitEthernet0/0/0",
+            "tx_kbps": 28000 if not in_inc else 19000,
+            "rx_kbps": 34000 if not in_inc else 22000,
+            "rx_errors": 0, "tx_errors": 0, "rx_drops": 0, "tx_drops": 0,
+        })
+        interface_stats_raw.append({
+            "entry_time": ms,
+            "interface": "GigabitEthernet0/0/1",
+            "tx_kbps": 45000 if not in_inc else 72000,
+            "rx_kbps": 60000 if not in_inc else 95000,
+            "rx_errors": 0, "tx_errors": 0, "rx_drops": 0, "tx_drops": 0,
+        })
+        cursor += timedelta(minutes=5)
 
     return (
         start_utc,
@@ -126,4 +159,7 @@ def get_demo_payloads(hours: int = 4):
         approute_stats,
         policy_raw,
         app_lists,
+        dpi_stats,
+        wan_interfaces_raw,
+        interface_stats_raw,
     )

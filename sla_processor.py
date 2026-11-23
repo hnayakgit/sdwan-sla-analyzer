@@ -101,6 +101,21 @@ class ObservedAppEntry:
 
 
 @dataclass
+class WanInterfaceSummary:
+    ifname: str
+    color: str
+    speed_mbps: float
+    peak_tx_mbps: float
+    peak_rx_mbps: float
+    peak_util_pct: float
+    total_errors: int
+    total_drops: int
+    diagnosis: str
+    # per 15-min bucket: {avg_tx_mbps, max_tx_mbps, avg_rx_mbps, max_rx_mbps, peak_util_pct, errors, drops}
+    buckets: List[dict] = field(default_factory=list)
+
+
+@dataclass
 class AnalysisResult:
     device_hostname: str
     system_ip: str
@@ -128,12 +143,14 @@ class AnalysisResult:
 
     app_failovers: List[AppFailoverEntry]
     observed_dpi_apps: List[ObservedAppEntry]
+    wan_interfaces: List[WanInterfaceSummary]
     raw_events: List[RawEventRecord]
 
     # Verdict & KPIs
     verdict_level: str     # "GREEN", "AMBER", "RED"
     verdict_title: str
     verdict_summary: str
+    probable_cause: str
     total_sla_events: int
     total_bfd_downs: int
     worst_transport: str
@@ -425,6 +442,8 @@ def analyze_sla_data(
     data_prefix_lists: Optional[Dict[str, Tuple[str, List[str]]]] = None,
     sla_class_lists: Optional[Dict[str, str]] = None,
     dpi_stats_raw: Optional[List[dict]] = None,
+    wan_interfaces_raw: Optional[List[dict]] = None,
+    interface_stats_raw: Optional[List[dict]] = None,
 ) -> AnalysisResult:
     # Align start_est down to nearest 15-min boundary for clean buckets
     start_est = start_utc.astimezone(EST_TZ)
@@ -894,6 +913,128 @@ def analyze_sla_data(
 
     app_failovers.sort(key=lambda x: (-x.duration_seconds, x.sla_class))
 
+    # 5b. Aggregate 15-min WAN Interface Utilization, Errors & Drops (Transport vs Congestion vs Errors)
+    wan_meta: Dict[str, dict] = {}
+    for row in wan_interfaces_raw or []:
+        ifn = str(row.get("ifname") or row.get("interface") or "").strip()
+        if not ifn:
+            continue
+        spd_raw = row.get("speed-mbps") or row.get("bandwidth-upstream") or row.get("bandwidth-downstream") or 0
+        try:
+            spd_mbps = float(str(spd_raw).replace("Mbps", "").strip() or 0)
+        except Exception:
+            spd_mbps = 0.0
+        wan_meta[ifn] = {
+            "color": str(row.get("color") or row.get("tloc-color") or "VPN0-WAN"),
+            "speed_mbps": spd_mbps,
+        }
+
+    # Filter interface stats to VPN 0 WAN interfaces (if known), else non-loopback/tunnel interfaces
+    if_bucket_raw: Dict[Tuple[str, int], Dict[str, List[float]]] = defaultdict(
+        lambda: {"tx": [], "rx": [], "err": [], "drop": []}
+    )
+    discovered_wan_ifs: Set[str] = set(wan_meta.keys())
+    for st in interface_stats_raw or []:
+        ifn = str(st.get("interface") or st.get("ifname") or "").strip()
+        if not ifn:
+            continue
+        if wan_meta and ifn not in wan_meta:
+            continue
+        if not wan_meta and ifn.lower().startswith(("loopback", "system", "tunnel", "vlan")):
+            continue
+        discovered_wan_ifs.add(ifn)
+        entry_ms = st.get("entry_time") or st.get("statcycletime") or 0
+        if not entry_ms:
+            continue
+        ep = float(entry_ms) / 1000.0
+        if ep < window_start_epoch or ep >= window_end_epoch:
+            continue
+        b_idx = int((ep - window_start_epoch) // BUCKET_SECONDS)
+        if 0 <= b_idx < num_buckets:
+            tx_mbps = float(st.get("tx_kbps", 0) or 0) / 1000.0
+            rx_mbps = float(st.get("rx_kbps", 0) or 0) / 1000.0
+            errs = float(st.get("rx_errors", 0) or 0) + float(st.get("tx_errors", 0) or 0)
+            drops = float(st.get("rx_drops", 0) or 0) + float(st.get("tx_drops", 0) or 0)
+            if_bucket_raw[(ifn, b_idx)]["tx"].append(tx_mbps)
+            if_bucket_raw[(ifn, b_idx)]["rx"].append(rx_mbps)
+            if_bucket_raw[(ifn, b_idx)]["err"].append(errs)
+            if_bucket_raw[(ifn, b_idx)]["drop"].append(drops)
+
+    wan_interfaces: List[WanInterfaceSummary] = []
+    any_high_util = False
+    any_if_errors = False
+    any_if_drops = False
+
+    for ifn in sorted(discovered_wan_ifs):
+        meta = wan_meta.get(ifn, {"color": "VPN0-WAN", "speed_mbps": 0.0})
+        spd = meta["speed_mbps"]
+        b_list = []
+        peak_tx = 0.0
+        peak_rx = 0.0
+        peak_util = 0.0
+        tot_err = 0
+        tot_drop = 0
+
+        for b in range(num_buckets):
+            vals = if_bucket_raw.get((ifn, b))
+            if vals and vals["tx"]:
+                avg_tx = round(sum(vals["tx"]) / len(vals["tx"]), 2)
+                max_tx = round(max(vals["tx"]), 2)
+                avg_rx = round(sum(vals["rx"]) / len(vals["rx"]), 2)
+                max_rx = round(max(vals["rx"]), 2)
+                b_err = int(round(sum(vals["err"])))
+                b_drop = int(round(sum(vals["drop"])))
+                util = round(max(max_tx, max_rx) / spd * 100.0, 1) if spd > 0 else 0.0
+            else:
+                avg_tx = max_tx = avg_rx = max_rx = util = 0.0
+                b_err = b_drop = 0
+
+            peak_tx = max(peak_tx, max_tx)
+            peak_rx = max(peak_rx, max_rx)
+            peak_util = max(peak_util, util)
+            tot_err += b_err
+            tot_drop += b_drop
+            b_list.append(
+                {
+                    "avg_tx_mbps": avg_tx,
+                    "max_tx_mbps": max_tx,
+                    "avg_rx_mbps": avg_rx,
+                    "max_rx_mbps": max_rx,
+                    "peak_util_pct": util,
+                    "errors": b_err,
+                    "drops": b_drop,
+                }
+            )
+
+        if peak_util >= 80.0:
+            any_high_util = True
+        if tot_err > 0:
+            any_if_errors = True
+        if tot_drop > 0:
+            any_if_drops = True
+
+        if tot_err > 0:
+            diag = f"Interface Errors Detected ({tot_err} errors)"
+        elif peak_util >= 80.0 or tot_drop > 0:
+            diag = f"High Utilization / Congestion ({peak_util:.1f}% peak, {tot_drop} drops)"
+        else:
+            diag = "Clean Local Link (No Congestion / 0 Errors)"
+
+        wan_interfaces.append(
+            WanInterfaceSummary(
+                ifname=ifn,
+                color=meta["color"],
+                speed_mbps=spd,
+                peak_tx_mbps=round(peak_tx, 2),
+                peak_rx_mbps=round(peak_rx, 2),
+                peak_util_pct=round(peak_util, 1),
+                total_errors=tot_err,
+                total_drops=tot_drop,
+                diagnosis=diag,
+                buckets=b_list,
+            )
+        )
+
     # 6. Compute KPIs & Automated Root-Cause Verdict
     worst_key = max(total_out_mins.items(), key=lambda x: x[1]) if total_out_mins else ((("N/A", "N/A", "N/A")), 0.0)
     worst_color, worst_hub, worst_queue = worst_key[0]
@@ -943,6 +1084,17 @@ def analyze_sla_data(
     else:
         backup_health_note = "No active tunnels detected"
 
+    if worst_queue_mins == 0 and bfd_down_count == 0:
+        probable_cause = "Healthy — No WAN Circuit, Utilization, or SLA Issue Detected"
+    elif not wan_interfaces:
+        probable_cause = "WAN SLA Breach Detected (No WAN Interface Stats Available — Check ISP/Carrier)"
+    elif any_if_errors:
+        probable_cause = "Local WAN Interface Errors / Physical Link Issue (Errors Incremented During Breach)"
+    elif any_high_util or any_if_drops:
+        probable_cause = "High WAN Utilization / Bandwidth Congestion (Peak >= 80% or Tx/Rx Drops)"
+    else:
+        probable_cause = "ISP / Carrier Transport Issue (Low Local WAN Utilization & 0 Interface Errors)"
+
     if simultaneous_all_breach or bfd_down_count > 0:
         verdict_level = "RED"
         verdict_title = "ROOT-CAUSE VERDICT: RED — CIRCUIT / SLA OUTAGE CONFIRMED"
@@ -951,17 +1103,16 @@ def analyze_sla_data(
             f"Recorded {len(parsed_sla_events)} SLA-change events and {bfd_down_count} BFD tunnel drop(s). "
             f"Worst impacted circuit: {worst_transport} ({worst_queue}: {worst_queue_mins:.1f} mins out-of-SLA; "
             f"Peak Loss: {peak_avg_loss:.1f}% avg / {peak_max_loss:.1f}% max, Latency: {peak_max_latency:.0f} ms, Jitter: {peak_max_jitter:.0f} ms). "
-            f"Conclusion: Site/application issues during this window WERE caused by WAN circuit/SLA degradation."
+            f"Probable Cause: {probable_cause}."
         )
     elif worst_queue_mins > 0:
         verdict_level = "AMBER"
         verdict_title = "ROOT-CAUSE VERDICT: AMBER — SINGLE-TRANSPORT DEGRADATION (TRAFFIC STEERED TO BACKUP)"
-        app_names_preview = ", ".join(dict.fromkeys(a.application for a in app_failovers[:6])) or worst_queue
+        app_names_preview = ", ".join(dict.fromkeys(a.sla_class for a in app_failovers[:6])) or worst_queue
         verdict_summary = (
-            f"Primary circuit '{worst_color}' to Hub {worst_hub} breached {worst_queue} for {worst_queue_mins:.1f} mins "
-            f"(Peak Loss: {peak_avg_loss:.1f}% avg / {peak_max_loss:.1f}% max at {peak_loss_time}, Latency: {peak_avg_latency:.0f} ms avg, Jitter: {peak_avg_jitter:.0f} ms avg). "
-            f"Affected traffic ({app_names_preview}) was automatically steered to backup transport ({backup_health_note}). "
-            f"Conclusion: Any voice/app blip during this window aligns with primary circuit SLA degradation & failover."
+            f"Primary circuit '{worst_color}' to Hub {worst_hub} breached {app_names_preview} (worst: {worst_queue} for {worst_queue_mins:.1f} mins; "
+            f"Peak Loss: {peak_avg_loss:.1f}% avg / {peak_max_loss:.1f}% max at {peak_loss_time}, Latency: {peak_avg_latency:.0f} ms avg, Jitter: {peak_avg_jitter:.0f} ms avg). "
+            f"Traffic was steered to backup ({backup_health_note}). Probable Cause: {probable_cause}."
         )
     else:
         verdict_level = "GREEN"
@@ -992,10 +1143,12 @@ def analyze_sla_data(
         tunnel_metrics=tunnel_metrics,
         app_failovers=app_failovers,
         observed_dpi_apps=observed_dpi_apps,
+        wan_interfaces=wan_interfaces,
         raw_events=raw_event_records,
         verdict_level=verdict_level,
         verdict_title=verdict_title,
         verdict_summary=verdict_summary,
+        probable_cause=probable_cause,
         total_sla_events=len(parsed_sla_events),
         total_bfd_downs=bfd_down_count,
         worst_transport=worst_transport,

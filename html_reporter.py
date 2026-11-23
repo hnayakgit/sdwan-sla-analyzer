@@ -150,6 +150,45 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
     else:
         dpi_rows_html = '<tr><td colspan="6" style="text-align:center;color:#57606A;">vManage DPI returned 0 application records for this device/window.</td></tr>'
 
+    # 4. Interactive WAN Interface Utilization & Errors Chart + Table
+    if result.wan_interfaces:
+        fig_wan = go.Figure()
+        wan_palette = ["#D93025", "#E67C00", "#005073", "#007A87", "#7B1FA2", "#2E7D32"]
+        c_idx = 0
+        for w_if in result.wan_interfaces[:3]:
+            tx_vals = [b["max_tx_mbps"] for b in w_if.buckets]
+            rx_vals = [b["max_rx_mbps"] for b in w_if.buckets]
+            fig_wan.add_trace(
+                go.Scatter(x=result.bucket_labels, y=tx_vals, mode="lines+markers", name=f"{w_if.ifname} Tx (Mbps)", line=dict(color=wan_palette[c_idx % len(wan_palette)], width=2.2))
+            )
+            c_idx += 1
+            fig_wan.add_trace(
+                go.Scatter(x=result.bucket_labels, y=rx_vals, mode="lines+markers", name=f"{w_if.ifname} Rx (Mbps)", line=dict(color=wan_palette[c_idx % len(wan_palette)], width=2.2, dash="dot"))
+            )
+            c_idx += 1
+        fig_wan.update_layout(
+            title="15-Min Peak WAN Interface Throughput (Mbps) Over Time (EST)",
+            xaxis_title="Time (EST)",
+            yaxis_title="Throughput (Mbps)",
+            hovermode="x unified",
+            height=360,
+            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0),
+            margin=dict(l=65, r=30, t=65, b=55),
+            template="plotly_white",
+        )
+        wan_chart_html = fig_wan.to_html(full_html=False, include_plotlyjs=False)
+        wan_rows_html = "".join(
+            f"<tr><td><b>{_esc(w.ifname)}</b></td><td>{_esc(w.color)}</td>"
+            f"<td>{f'{w.speed_mbps:.0f} Mbps' if w.speed_mbps > 0 else 'N/A'}</td>"
+            f"<td>{w.peak_tx_mbps:.2f} Mbps</td><td>{w.peak_rx_mbps:.2f} Mbps</td>"
+            f"<td><b>{w.peak_util_pct:.1f}%</b></td><td>{w.total_errors}</td><td>{w.total_drops}</td>"
+            f"<td class='{'sev-recovered' if 'Clean' in w.diagnosis else 'sev-breach'}'>{_esc(w.diagnosis)}</td></tr>"
+            for w in result.wan_interfaces
+        )
+    else:
+        wan_chart_html = '<div style="color:#57606A;padding:12px;">No WAN interface statistics returned by vManage.</div>'
+        wan_rows_html = '<tr><td colspan="9" style="text-align:center;color:#57606A;">No WAN interface data available.</td></tr>'
+
     # Raw Events Table Rows
     if result.raw_events:
         ev_rows_html = "".join(
@@ -208,6 +247,7 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
     </div>
 
     <div class="kpi-grid">
+      <div class="kpi"><div class="label">Probable Root Cause</div><div class="value" style="font-size:14px;">{_esc(result.probable_cause)}</div></div>
       <div class="kpi"><div class="label">SLA / BFD Events</div><div class="value">{result.total_sla_events} SLA | {result.total_bfd_downs} BFD Drops</div></div>
       <div class="kpi"><div class="label">Worst Affected Circuit</div><div class="value">{_esc(result.worst_transport)}</div></div>
       <div class="kpi"><div class="label">Worst Queue Out-of-SLA</div><div class="value">{_esc(result.worst_queue)} ({result.worst_queue_mins:.1f}m)</div></div>
@@ -235,6 +275,17 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
         <table>
           <thead><tr><th>Application Name</th><th>Family</th><th>Mapped Queue</th><th>Volume (MB)</th><th>Packets</th><th>VPN ID</th></tr></thead>
           <tbody>{dpi_rows_html}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>WAN Interface Utilization, Errors & Drops (Transport vs. Congestion)</h3>
+      {wan_chart_html}
+      <div style="overflow-x:auto;margin-top:14px;">
+        <table>
+          <thead><tr><th>WAN Interface</th><th>Color</th><th>Link Speed</th><th>Peak Tx</th><th>Peak Rx</th><th>Peak Util %</th><th>Errors</th><th>Drops</th><th>Diagnosis</th></tr></thead>
+          <tbody>{wan_rows_html}</tbody>
         </table>
       </div>
     </div>

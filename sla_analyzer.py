@@ -70,6 +70,9 @@ def run_demo(hours: int = 4):
         approute_stats,
         policy_raw,
         app_lists,
+        dpi_stats,
+        wan_interfaces_raw,
+        interface_stats_raw,
     ) = get_demo_payloads(hours=hours)
 
     duration_label = f"Last {hours} hours (DEMO)"
@@ -85,6 +88,9 @@ def run_demo(hours: int = 4):
         approute_stats_raw=approute_stats,
         policy_raw=policy_raw,
         app_lists=app_lists,
+        dpi_stats_raw=dpi_stats,
+        wan_interfaces_raw=wan_interfaces_raw,
+        interface_stats_raw=interface_stats_raw,
     )
     _write_outputs_and_print(result)
 
@@ -106,6 +112,7 @@ def _write_outputs_and_print(result):
     print("=" * 70)
     print(f"  Device         : {result.device_hostname} ({result.system_ip}) | Site ID: {result.site_id}")
     print(f"  Window (EST)   : {result.start_est_str} -> {result.end_est_str}")
+    print(f"  Probable Cause : {result.probable_cause}")
     print(f"  SLA / BFD      : {result.total_sla_events} SLA-change events | {result.total_bfd_downs} BFD drops")
     print(f"  Worst Circuit  : {result.worst_transport} | Worst Queue: {result.worst_queue} ({result.worst_queue_mins:.1f}m)")
     print(f"  Peak Loss      : {result.peak_avg_loss:.1f}% Avg / {result.peak_max_loss:.1f}% Max ({result.peak_loss_time})")
@@ -170,8 +177,14 @@ def main():
         sla_class_lists = client.get_sla_class_lists()
         aar_policy_defs = client.get_aar_policy_definitions()
         dpi_stats = client.get_dpi_app_stats(device_ip, start_utc, end_utc, hostname=hostname)
+        wan_interfaces_raw = client.get_wan_interfaces(device_ip)
+        interface_stats_raw = client.get_interface_stats(device_ip, start_utc, end_utc)
 
-        print(f"[+] Retrieved {len(events_raw)} SLA/BFD events, {len(approute_stats)} approute samples, {len(aar_policy_defs)} AAR policy def(s), and {len(dpi_stats)} DPI app record(s). Processing 15-min EST buckets...")
+        print(
+            f"[+] Retrieved {len(events_raw)} SLA/BFD events, {len(approute_stats)} approute samples, "
+            f"{len(aar_policy_defs)} AAR policy def(s), {len(dpi_stats)} SAIE/DPI app record(s), "
+            f"and {len(interface_stats_raw)} WAN interface stat sample(s). Processing 15-min EST buckets..."
+        )
         result = analyze_sla_data(
             vmanage_host=vmanage_ip,
             device_info=device_info,
@@ -188,6 +201,8 @@ def main():
             data_prefix_lists=data_prefix_lists,
             sla_class_lists=sla_class_lists,
             dpi_stats_raw=dpi_stats,
+            wan_interfaces_raw=wan_interfaces_raw,
+            interface_stats_raw=interface_stats_raw,
         )
         _write_outputs_and_print(result)
 

@@ -216,8 +216,8 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     ]
 
     kpi_rows = [
-        ("Total SLA-Change Events", f"{result.total_sla_events} Events"),
-        ("BFD Tunnel Down Events", f"{result.total_bfd_downs} Drops"),
+        ("Probable Root Cause", result.probable_cause),
+        ("Total SLA / BFD Events", f"{result.total_sla_events} SLA-Change  |  {result.total_bfd_downs} BFD Drops"),
         ("Worst Affected Circuit", result.worst_transport),
         ("Peak Avg / Max Packet Loss", f"{result.peak_avg_loss:.1f}% Avg  |  {result.peak_max_loss:.1f}% Max  ({result.peak_loss_time})"),
         ("Peak Avg Latency / Jitter", f"{result.peak_avg_latency:.0f} ms Latency  |  {result.peak_avg_jitter:.0f} ms Jitter"),
@@ -692,6 +692,136 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     col_widths_5 = [25, 16, 14, 16, 32, 32, 56]
     for c_idx, w in enumerate(col_widths_5, start=1):
         ws5.column_dimensions[get_column_letter(c_idx)].width = w
+
+    # ==========================================================================
+    # TAB 6: WAN INTERFACE UTILIZATION, ERRORS & DROPS (TRANSPORT vs CONGESTION)
+    # ==========================================================================
+    ws6 = wb.create_sheet("WAN Utilization & Errors")
+    ws6.views.sheetView[0].showGridLines = True
+
+    ws6.merge_cells("A1:I1")
+    ws6["A1"] = "WAN Interface Utilization, Errors & Drops (EST) — Transport vs. Congestion vs. Link Errors"
+    ws6["A1"].font = title_font
+    ws6["A1"].fill = navy_fill
+    ws6["A1"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws6.row_dimensions[1].height = 32
+
+    ws6.merge_cells("A2:I2")
+    ws6["A2"] = f"Automated Probable Cause:  {result.probable_cause}"
+    ws6["A2"].font = Font(name="Calibri", size=11, bold=True, color=v_txt)
+    ws6["A2"].fill = v_fill
+    ws6["A2"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws6.row_dimensions[2].height = 24
+
+    ws6["A4"] = "VPN 0 WAN Interface Health Summary"
+    ws6["A4"].font = section_font
+    ws6.row_dimensions[4].height = 22
+
+    wan_sum_headers = [
+        "WAN Interface", "Transport Color", "Link Speed (Mbps)",
+        "Peak Tx (Mbps)", "Peak Rx (Mbps)", "Peak Util (%)",
+        "Total Errors", "Total Drops", "Diagnosis"
+    ]
+    for c, h in enumerate(wan_sum_headers, start=1):
+        ws6.cell(5, c, h)
+    _style_table_header(ws6, 5, 1, len(wan_sum_headers), height=28)
+
+    if result.wan_interfaces:
+        for idx_w, w_if in enumerate(result.wan_interfaces, start=6):
+            ws6.row_dimensions[idx_w].height = 22
+            w_vals = [
+                w_if.ifname, w_if.color, w_if.speed_mbps if w_if.speed_mbps > 0 else "N/A",
+                w_if.peak_tx_mbps, w_if.peak_rx_mbps, w_if.peak_util_pct,
+                w_if.total_errors, w_if.total_drops, w_if.diagnosis
+            ]
+            for c, v in enumerate(w_vals, start=1):
+                cell = ws6.cell(idx_w, c, v)
+                cell.font = bold_font if c in (1, 9) else regular_font
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal="left" if c in (1, 9) else "center", vertical="center")
+                if c in (4, 5):
+                    cell.number_format = "0.00"
+                elif c == 6:
+                    cell.number_format = '0.0"%"'
+                if c == 9:
+                    if "Clean" in str(v):
+                        cell.fill = green_fill
+                        cell.font = Font(name="Calibri", size=10, bold=True, color=GREEN_TXT)
+                    else:
+                        cell.fill = red_fill
+                        cell.font = Font(name="Calibri", size=10, bold=True, color=RED_TXT)
+                else:
+                    cell.fill = zebra_fill if idx_w % 2 == 0 else white_fill
+
+        # 15-Minute WAN Throughput & Error Table (for chart + deep dive)
+        detail_start = 6 + len(result.wan_interfaces) + 2
+        ws6.cell(detail_start, 1, "15-Minute WAN Interface Throughput (Mbps), Errors & Drops (EST)").font = section_font
+        ws6.row_dimensions[detail_start].height = 22
+
+        top_wans = result.wan_interfaces[:3]
+        det_headers = ["Time (EST)"]
+        for w_if in top_wans:
+            det_headers.extend([f"{w_if.ifname} Tx (Mbps)", f"{w_if.ifname} Rx (Mbps)"])
+        det_headers.extend(["Total Errors (All WAN)", "Total Drops (All WAN)"])
+
+        hdr_row = detail_start + 1
+        for c, h in enumerate(det_headers, start=1):
+            ws6.cell(hdr_row, c, h)
+        _style_table_header(ws6, hdr_row, 1, len(det_headers), height=30)
+
+        max_mbps_seen = 10.0
+        for b in range(num_buckets):
+            r = hdr_row + 1 + b
+            ws6.row_dimensions[r].height = 20
+            row_v = [result.bucket_labels[b]]
+            b_err_sum = 0
+            b_drop_sum = 0
+            for w_if in top_wans:
+                bk = w_if.buckets[b] if b < len(w_if.buckets) else {"max_tx_mbps": 0.0, "max_rx_mbps": 0.0}
+                row_v.extend([bk["max_tx_mbps"], bk["max_rx_mbps"]])
+                max_mbps_seen = max(max_mbps_seen, bk["max_tx_mbps"], bk["max_rx_mbps"])
+            for w_if in result.wan_interfaces:
+                if b < len(w_if.buckets):
+                    b_err_sum += w_if.buckets[b]["errors"]
+                    b_drop_sum += w_if.buckets[b]["drops"]
+            row_v.extend([b_err_sum, b_drop_sum])
+
+            for c, v in enumerate(row_v, start=1):
+                cell = ws6.cell(r, c, v)
+                cell.font = bold_font if c == 1 else regular_font
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                if 2 <= c <= 1 + 2 * len(top_wans):
+                    cell.number_format = "0.00"
+                cell.fill = zebra_fill if r % 2 == 0 else white_fill
+
+        det_end_row = hdr_row + num_buckets
+        err_col_let = get_column_letter(len(det_headers) - 1)
+        drop_col_let = get_column_letter(len(det_headers))
+        red_gt0 = CellIsRule(operator="greaterThan", formula=["0"], fill=red_fill, font=Font(bold=True, color=RED_TXT))
+        ws6.conditional_formatting.add(f"{err_col_let}{hdr_row + 1}:{drop_col_let}{det_end_row}", red_gt0)
+
+        # Clean WAN Throughput (Mbps) Chart over EST
+        wan_chart = LineChart()
+        wan_chart.title = "15-Min Peak WAN Interface Throughput (Mbps) Over Time (EST)"
+        wan_chart.y_axis.scaling.min = 0
+        wan_chart.y_axis.scaling.max = int(max_mbps_seen * 1.25) + 5
+        wan_chart.add_data(Reference(ws6, min_col=2, min_row=hdr_row, max_col=1 + 2 * len(top_wans), max_row=det_end_row), titles_from_data=True)
+        wan_chart.set_categories(Reference(ws6, min_col=1, min_row=hdr_row + 1, max_row=det_end_row))
+        wan_colors = ["D93025", "E67C00", "005073", "007A87", "7B1FA2", "2E7D32"]
+        for idx_s, s in enumerate(wan_chart.series):
+            _style_line_series(s, wan_colors[idx_s % len(wan_colors)])
+        _configure_time_chart(wan_chart, y_title="Throughput (Mbps)", tick_skip=tick_skip, show_legend=True)
+        ws6.add_chart(wan_chart, f"A{det_end_row + 3}")
+    else:
+        ws6.merge_cells("A6:I6")
+        ws6["A6"] = "vManage returned 0 WAN interface statistics for this device/window."
+        ws6["A6"].font = Font(name="Calibri", size=10, italic=True, color=MUTED_TXT)
+        ws6.row_dimensions[6].height = 24
+
+    col_widths_6 = [24, 16, 18, 16, 16, 15, 14, 14, 42]
+    for c_idx, w in enumerate(col_widths_6, start=1):
+        ws6.column_dimensions[get_column_letter(c_idx)].width = w
 
     wb.save(output_path)
     return output_path
