@@ -34,7 +34,7 @@ Instead of digging through thousands of raw `sla-change` events in vManage, engi
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/hanayak_cisco/sdwan-sla-analyzer.git
+git clone https://github.com/hnayakgit/sdwan-sla-analyzer.git
 cd sdwan-sla-analyzer
 ```
 
