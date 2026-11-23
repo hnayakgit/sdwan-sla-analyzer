@@ -271,7 +271,12 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         ws1.cell(17, c, h)
     _style_table_header(ws1, 17, 1, 4, height=26)
 
-    display_tunnels = result.tunnels[:6] if result.tunnels else [("N/A", "N/A")]
+    # Sort tunnels by highest total Out-of-SLA minutes descending so breached circuits appear first!
+    sorted_tunnels = sorted(
+        result.tunnels,
+        key=lambda t: -sum(result.total_out_mins.get((t[0], t[1], q), 0.0) for q in sla_names),
+    )
+    display_tunnels = sorted_tunnels[:6] if sorted_tunnels else [("N/A", "N/A")]
     for i, (color, rip) in enumerate(display_tunnels, start=18):
         ws1.row_dimensions[i].height = 22
         row_vals = [f"{color} -> Hub {rip}"]

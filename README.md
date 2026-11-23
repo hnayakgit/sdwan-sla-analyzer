@@ -39,9 +39,25 @@ cd sdwan-sla-analyzer
 ```
 
 ### 2. Create a Virtual Environment & Install Dependencies
+
+**macOS / Linux:**
 ```bash
 python3 -m venv venv
-source venv/bin/activate        # On Windows: venv\Scripts\activate
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Windows (PowerShell):**
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+**Windows (Command Prompt / `cmd`):**
+```cmd
+python -m venv venv
+venv\Scripts\activate.bat
 pip install -r requirements.txt
 ```
 

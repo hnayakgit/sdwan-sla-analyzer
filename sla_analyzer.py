@@ -159,15 +159,18 @@ def main():
         reachability = device_info.get("reachability", "unknown")
         print(f"[+] Device found: {hostname} | Site ID: {site_id} | Status: {reachability}")
 
-        print(f"[+] Fetching SLA classes, tunnels, AAR policy, events & approute stats ({duration_label})...")
+        print(f"[+] Fetching SLA classes, tunnels, AAR policy definitions, events & approute stats ({duration_label})...")
         sla_classes = client.get_sla_classes(device_ip)
         site_tunnels = client.get_site_tunnels(site_id) if site_id != "N/A" else []
         events_raw = client.get_sla_and_bfd_events(device_ip, start_utc, end_utc)
         approute_stats = client.get_approute_stats(device_ip, start_utc, end_utc)
         policy_raw = client.get_policy_from_vsmart(device_ip)
         app_lists = client.get_app_lists()
+        data_prefix_lists = client.get_data_prefix_lists()
+        sla_class_lists = client.get_sla_class_lists()
+        aar_policy_defs = client.get_aar_policy_definitions()
 
-        print(f"[+] Retrieved {len(events_raw)} SLA/BFD events and {len(approute_stats)} approute samples. Processing 15-min EST buckets...")
+        print(f"[+] Retrieved {len(events_raw)} SLA/BFD events, {len(approute_stats)} approute samples, and {len(aar_policy_defs)} AAR policy definition(s). Processing 15-min EST buckets...")
         result = analyze_sla_data(
             vmanage_host=vmanage_ip,
             device_info=device_info,
@@ -180,6 +183,9 @@ def main():
             approute_stats_raw=approute_stats,
             policy_raw=policy_raw,
             app_lists=app_lists,
+            aar_policy_defs=aar_policy_defs,
+            data_prefix_lists=data_prefix_lists,
+            sla_class_lists=sla_class_lists,
         )
         _write_outputs_and_print(result)
 

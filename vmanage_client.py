@@ -119,11 +119,12 @@ class VManageClient:
             return []
 
     def get_app_lists(self) -> Dict[str, List[str]]:
-        """Best-effort fetch of vManage app-list definitions to expand app-list names into app names."""
+        """Fetch vManage app-list definitions (id and name -> list of application names)."""
         mapping: Dict[str, List[str]] = {}
         try:
             items = self.get("/template/policy/list/app").get("data", [])
             for item in items:
+                list_id = item.get("listId")
                 name = item.get("name")
                 entries = item.get("entries", [])
                 apps = []
@@ -131,11 +132,84 @@ class VManageClient:
                     val = entry.get("app") or entry.get("appFamily")
                     if val:
                         apps.append(val)
-                if name and apps:
-                    mapping[name] = apps
+                if apps:
+                    if name:
+                        mapping[name] = apps
+                    if list_id:
+                        mapping[list_id] = apps
         except Exception:
             pass
         return mapping
+
+    def get_data_prefix_lists(self) -> Dict[str, Tuple[str, List[str]]]:
+        """Fetch vManage data-prefix-list definitions (id/name -> (list_name, [ip_prefixes]))."""
+        mapping: Dict[str, Tuple[str, List[str]]] = {}
+        try:
+            items = self.get("/template/policy/list/dataprefix").get("data", [])
+            for item in items:
+                list_id = item.get("listId")
+                name = item.get("name", "Prefix-List")
+                prefixes = [
+                    e.get("ipPrefix") for e in item.get("entries", []) if e.get("ipPrefix")
+                ]
+                if prefixes:
+                    mapping[name] = (name, prefixes)
+                    if list_id:
+                        mapping[list_id] = (name, prefixes)
+        except Exception:
+            pass
+        return mapping
+
+    def get_sla_class_lists(self) -> Dict[str, str]:
+        """Map vManage SLA class listId -> SLA class name (e.g., Queue0, Queue1)."""
+        mapping: Dict[str, str] = {}
+        try:
+            items = self.get("/template/policy/list/sla").get("data", [])
+            for item in items:
+                list_id = item.get("listId")
+                name = item.get("name")
+                if list_id and name:
+                    mapping[list_id] = name
+        except Exception:
+            pass
+        return mapping
+
+    def get_aar_policy_definitions(self) -> List[dict]:
+        """Fetch detailed JSON definitions of active App-Aware Routing policies from vManage."""
+        detailed: List[dict] = []
+        try:
+            # Prefer definitions referenced by the currently active centralized vSmart policy
+            active_def_ids = set()
+            vsmart_policies = self.get("/template/policy/vsmart").get("data", [])
+            for pol in vsmart_policies:
+                if pol.get("isPolicyActivated"):
+                    p_def = pol.get("policyDefinition", {})
+                    if isinstance(p_def, str):
+                        import json
+                        try:
+                            p_def = json.loads(p_def)
+                        except Exception:
+                            p_def = {}
+                    for asm in p_def.get("assembly", []):
+                        if asm.get("type") == "appRoute" and asm.get("definitionId"):
+                            active_def_ids.add(asm["definitionId"])
+
+            all_aar = self.get("/template/policy/definition/approute").get("data", [])
+            target_ids = [
+                d.get("definitionId")
+                for d in all_aar
+                if d.get("definitionId") and (not active_def_ids or d.get("definitionId") in active_def_ids)
+            ]
+            for def_id in target_ids:
+                try:
+                    detail = self.get(f"/template/policy/definition/approute/{def_id}")
+                    if detail:
+                        detailed.append(detail)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return detailed
 
     @staticmethod
     def _chunk_time_windows(
