@@ -56,15 +56,17 @@ class AARPolicyRule:
     sla_class: str
     app_list: str
     apps: List[str]
+    dscp_values: List[str]
+    ip_prefixes: List[str]
     preferred_colors: List[str]
     backup_colors: List[str]
 
 
 @dataclass
 class AppFailoverEntry:
-    application: str
-    app_list: str
-    sla_class: str
+    sla_class: str          # Queue name (e.g., Queue0, Queue1, Voice-SLA)
+    application: str        # Resolved Application names (or traffic class if DSCP-only)
+    app_list: str           # App-List / DSCP / IP match reference
     preferred_color: str
     moved_to_color: str
     start_est: str
@@ -182,9 +184,39 @@ def _fmt_dscp(val: str) -> str:
     return ", ".join(DSCP_LABELS.get(p, f"DSCP {p}") for p in parts)
 
 
+def _resolve_app_list(app_lists: dict, key: str) -> Tuple[str, List[str]]:
+    val = app_lists.get(key)
+    if isinstance(val, tuple) and len(val) == 2:
+        return val[0], list(val[1])
+    if isinstance(val, list):
+        return key, list(val)
+    return key, [key]
+
+
+def _classify_dscp_traffic(dscp_nums: List[str]) -> str:
+    """Friendly traffic class summary for DSCP-only queues (when no app-list is configured)."""
+    s = set(dscp_nums)
+    tags = []
+    if s & {"46", "40", "48"}:
+        tags.append("Voice / Real-Time")
+    if s & {"32", "34", "36", "38"}:
+        tags.append("Interactive Video")
+    if s & {"24", "26", "28", "30"}:
+        tags.append("Call-Signaling / Critical Data")
+    if s & {"16", "18", "20", "22"}:
+        tags.append("Transactional / Business Data")
+    if s & {"8", "10", "12", "14"}:
+        tags.append("Bulk / Low-Priority Data")
+    if "0" in s:
+        tags.append("Best-Effort / Default")
+    dscp_str = ", ".join(sorted(s, key=lambda x: int(x) if x.isdigit() else 999))
+    label = " / ".join(tags) if tags else "DSCP-Matched Traffic"
+    return f"{label} (DSCP: {dscp_str})"
+
+
 def parse_aar_policy(
     policy_from_vsmart: List[dict],
-    app_lists: Dict[str, List[str]],
+    app_lists: dict,
     known_colors: List[str],
     aar_policy_defs: Optional[List[dict]] = None,
     data_prefix_lists: Optional[Dict[str, Tuple[str, List[str]]]] = None,
@@ -202,7 +234,8 @@ def parse_aar_policy(
     for item in policy_from_vsmart or []:
         if isinstance(item, dict) and "sla_class" in item and "preferred_colors" in item:
             app_list_name = item.get("app_list", item.get("sla_class"))
-            apps = item.get("apps") or app_lists.get(app_list_name, [app_list_name])
+            _, resolved = _resolve_app_list(app_lists, app_list_name)
+            apps = item.get("apps") or resolved
             pref = item.get("preferred_colors", [])
             backup = item.get("backup_colors") or [c for c in known_colors if c not in pref]
             rules.append(
@@ -210,6 +243,8 @@ def parse_aar_policy(
                     sla_class=item["sla_class"],
                     app_list=app_list_name,
                     apps=apps,
+                    dscp_values=[],
+                    ip_prefixes=[],
                     preferred_colors=pref,
                     backup_colors=backup,
                 )
@@ -219,10 +254,7 @@ def parse_aar_policy(
 
     # Strategy 2: Official vManage /template/policy/definition/approute/{id} JSON definitions
     for pol_def in aar_policy_defs or []:
-        pol_name = pol_def.get("name", "AAR-Policy")
         for seq in pol_def.get("sequences", []):
-            seq_name = seq.get("sequenceName") or f"Seq-{seq.get('sequenceId', '')}"
-            # Find SLA class + preferred colors in actions
             sla_name = None
             pref_colors: List[str] = []
             backup_colors: List[str] = []
@@ -246,45 +278,45 @@ def parse_aar_policy(
             if not sla_name or sla_name == "__all_tunnels__":
                 continue
 
-            # Extract matched Apps, IP Prefixes, IPs, or DSCP from match.entries
-            matched_items: List[str] = []
-            match_group_names: List[str] = []
+            apps_found: List[str] = []
+            dscp_found: List[str] = []
+            ip_found: List[str] = []
+            match_names: List[str] = []
+
             for entry in seq.get("match", {}).get("entries", []):
                 fld = entry.get("field", "")
                 val = entry.get("value") or entry.get("ref") or ""
                 if not val:
                     continue
                 if fld == "appList":
-                    resolved_apps = app_lists.get(val, [val])
-                    matched_items.extend(resolved_apps[:12])
-                    match_group_names.append(f"AppList:{val[:18]}")
+                    al_name, resolved_apps = _resolve_app_list(app_lists, val)
+                    apps_found.extend(resolved_apps)
+                    match_names.append(al_name)
+                elif fld in ("dnsAppList", "app", "saasAppList"):
+                    apps_found.append(str(val))
+                    match_names.append(str(val))
                 elif fld in ("sourceDataPrefixList", "destinationDataPrefixList"):
                     p_name, prefixes = data_prefix_lists.get(val, (val, [val]))
-                    direction = "Src" if "source" in fld else "Dst"
-                    preview = ", ".join(prefixes[:4]) + (" ..." if len(prefixes) > 4 else "")
-                    matched_items.append(f"{direction} IP: {preview}")
-                    match_group_names.append(p_name)
+                    ip_found.extend(prefixes[:6])
+                    match_names.append(p_name)
                 elif fld in ("sourceIp", "destinationIp"):
-                    direction = "Src" if "source" in fld else "Dst"
-                    matched_items.append(f"{direction} IP: {val}")
-                    match_group_names.append("IP-Match")
+                    ip_found.append(str(val))
+                    match_names.append("IP-Match")
                 elif fld == "dscp":
-                    matched_items.append(_fmt_dscp(val))
-                    match_group_names.append(f"DSCP-{val}")
-                elif fld in ("dnsAppList", "app", "saasAppList"):
-                    matched_items.append(str(val))
-                    match_group_names.append(fld)
+                    nums = [x.strip() for x in re.split(r"[,\s]+", str(val).strip()) if x.strip()]
+                    dscp_found.extend(nums)
+                    match_names.append(f"DSCP({','.join(nums)})")
 
-            if not matched_items:
-                matched_items = [f"{seq_name} ({pol_name})"]
             if not backup_colors:
                 backup_colors = [c for c in known_colors if c not in pref_colors]
 
             rules.append(
                 AARPolicyRule(
                     sla_class=sla_name,
-                    app_list=", ".join(dict.fromkeys(match_group_names)) or seq_name,
-                    apps=list(dict.fromkeys(matched_items)),
+                    app_list=", ".join(dict.fromkeys(match_names)) or sla_name,
+                    apps=list(dict.fromkeys(apps_found)),
+                    dscp_values=list(dict.fromkeys(dscp_found)),
+                    ip_prefixes=list(dict.fromkeys(ip_found)),
                     preferred_colors=pref_colors,
                     backup_colors=backup_colors,
                 )
@@ -315,7 +347,11 @@ def parse_aar_policy(
         if sla_name == "__all_tunnels__":
             continue
 
-        matched_items = []
+        apps_found = []
+        dscp_found = []
+        ip_found = []
+        match_names = []
+
         app_list_match = re.search(r"app-list\s+([^\s\n]+)", block)
         src_pfx_match = re.search(r"source-data-prefix-list\s+([^\s\n]+)", block)
         dst_pfx_match = re.search(r"destination-data-prefix-list\s+([^\s\n]+)", block)
@@ -325,32 +361,26 @@ def parse_aar_policy(
         pref_match = re.search(r"preferred-color\s+([^\n]+)", block)
         backup_match = re.search(r"backup-sla-preferred-color\s+([^\n]+)", block)
 
-        group_label = sla_name
         if app_list_match:
-            al_name = app_list_match.group(1).strip()
-            group_label = al_name
-            matched_items.extend(app_lists.get(al_name, [al_name])[:12])
+            al_name, resolved_apps = _resolve_app_list(app_lists, app_list_match.group(1).strip())
+            apps_found.extend(resolved_apps)
+            match_names.append(al_name)
         if src_pfx_match:
-            p_key = src_pfx_match.group(1).strip()
-            p_name, pfxs = data_prefix_lists.get(p_key, (p_key, [p_key]))
-            group_label = p_name
-            matched_items.append(f"Src IP: {', '.join(pfxs[:4])}")
+            p_name, pfxs = data_prefix_lists.get(src_pfx_match.group(1).strip(), (src_pfx_match.group(1).strip(), []))
+            ip_found.extend(pfxs[:6])
+            match_names.append(p_name)
         if dst_pfx_match:
-            p_key = dst_pfx_match.group(1).strip()
-            p_name, pfxs = data_prefix_lists.get(p_key, (p_key, [p_key]))
-            group_label = p_name
-            matched_items.append(f"Dst IP: {', '.join(pfxs[:4])}")
+            p_name, pfxs = data_prefix_lists.get(dst_pfx_match.group(1).strip(), (dst_pfx_match.group(1).strip(), []))
+            ip_found.extend(pfxs[:6])
+            match_names.append(p_name)
         if src_ip_match:
-            matched_items.append(f"Src IP: {src_ip_match.group(1).strip()}")
+            ip_found.append(src_ip_match.group(1).strip())
         if dst_ip_match:
-            matched_items.append(f"Dst IP: {dst_ip_match.group(1).strip()}")
+            ip_found.append(dst_ip_match.group(1).strip())
         if dscp_match:
-            matched_items.append(_fmt_dscp(dscp_match.group(1).strip()))
-            if group_label == sla_name:
-                group_label = f"DSCP-{dscp_match.group(1).strip()}"
-
-        if not matched_items:
-            matched_items = [sla_name]
+            nums = [x.strip() for x in re.split(r"[,\s]+", dscp_match.group(1).strip()) if x.strip()]
+            dscp_found.extend(nums)
+            match_names.append(f"DSCP({','.join(nums)})")
 
         pref_colors = pref_match.group(1).split() if pref_match else []
         backup_colors = backup_match.group(1).split() if backup_match else [
@@ -360,8 +390,10 @@ def parse_aar_policy(
         rules.append(
             AARPolicyRule(
                 sla_class=sla_name,
-                app_list=group_label,
-                apps=list(dict.fromkeys(matched_items)),
+                app_list=", ".join(dict.fromkeys(match_names)) or sla_name,
+                apps=list(dict.fromkeys(apps_found)),
+                dscp_values=list(dict.fromkeys(dscp_found)),
+                ip_prefixes=list(dict.fromkeys(ip_found)),
                 preferred_colors=pref_colors,
                 backup_colors=backup_colors,
             )
@@ -603,12 +635,22 @@ def analyze_sla_data(
                 start_b = open_breach_start[q] if open_breach_start[q] is not None else prev_time
                 breach_intervals[(c, rip, q)].append((start_b, window_end_epoch))
 
+    # Actual elapsed seconds in each bucket (handles partial last bucket accurately)
+    bucket_durations = [
+        max(1.0, min(window_start_epoch + (b + 1) * BUCKET_SECONDS, window_end_epoch) - (window_start_epoch + b * BUCKET_SECONDS))
+        for b in range(num_buckets)
+    ]
+
     heatmap_pct: Dict[Tuple[str, str, str], List[float]] = {}
     total_out_mins: Dict[Tuple[str, str, str], float] = {}
     for key, secs_list in in_sla_secs.items():
-        pcts = [round(max(0.0, 100.0 - (s / BUCKET_SECONDS) * 100.0), 1) for s in secs_list]
+        pcts = [
+            round(max(0.0, 100.0 - (s / bucket_durations[b]) * 100.0), 1)
+            for b, s in enumerate(secs_list)
+        ]
+        out_secs_total = sum(max(0.0, bucket_durations[b] - s) for b, s in enumerate(secs_list))
         heatmap_pct[key] = pcts
-        total_out_mins[key] = round(sum(pcts) / 100.0 * 15.0, 2)
+        total_out_mins[key] = round(out_secs_total / 60.0, 2)
 
     # 4. Aggregate 15-min Tunnel Loss / Latency / Jitter from approute stats
     bucket_raw: Dict[Tuple[str, str, int], Dict[str, List[float]]] = defaultdict(
@@ -698,54 +740,73 @@ def analyze_sla_data(
         start_str = fmt_est(datetime.fromtimestamp(first_start, tz=timezone.utc), include_date=True)
         end_str = fmt_est(datetime.fromtimestamp(last_end, tz=timezone.utc), include_date=True)
 
-        matched_rules = rules_by_sla.get(q, [])
-        if matched_rules:
-            for rule in matched_rules:
-                if rule.preferred_colors and c not in rule.preferred_colors:
-                    continue
-                # Determine backup color(s) that remained healthy
-                healthy_backups = [
-                    bc for bc in rule.backup_colors
-                    if total_out_mins.get((bc, rip, q), 0.0) < (total_sec / 60.0)
-                ]
-                moved_to = ", ".join(healthy_backups) if healthy_backups else "All Transports Breached (Fallback)"
-                for app_name in rule.apps:
-                    app_failovers.append(
-                        AppFailoverEntry(
-                            application=app_name,
-                            app_list=rule.app_list,
-                            sla_class=q,
-                            preferred_color=c,
-                            moved_to_color=moved_to,
-                            start_est=start_str,
-                            end_est=end_str,
-                            duration_seconds=total_sec,
-                            duration_mins=round(total_sec / 60.0, 1),
-                            duration_hms=fmt_duration_hms(total_sec),
-                            failover_count=len(intervals),
-                        )
-                    )
-        else:
-            # Fallback if AAR policy didn't expose app names
-            other_colors = [oc for oc in colors if oc != c]
-            moved_to = ", ".join(other_colors) if other_colors else "No Backup Color"
-            app_failovers.append(
-                AppFailoverEntry(
-                    application=f"{q} Traffic",
-                    app_list="Policy-Mapped",
-                    sla_class=q,
-                    preferred_color=c,
-                    moved_to_color=moved_to,
-                    start_est=start_str,
-                    end_est=end_str,
-                    duration_seconds=total_sec,
-                    duration_mins=round(total_sec / 60.0, 1),
-                    duration_hms=fmt_duration_hms(total_sec),
-                    failover_count=len(intervals),
-                )
-            )
+        # Always determine backup transport from actual healthy colors present on THIS device
+        device_other_colors = [oc for oc in colors if oc != c]
+        healthy_backups = [
+            oc for oc in device_other_colors
+            if total_out_mins.get((oc, rip, q), 0.0) < (total_sec / 60.0)
+        ]
+        moved_to = (
+            ", ".join(healthy_backups)
+            if healthy_backups
+            else ("All Transports Breached (Fallback)" if device_other_colors else "No Backup Color")
+        )
 
-    app_failovers.sort(key=lambda x: (-x.duration_seconds, x.application))
+        # Aggregate & deduplicate all AAR rules matching this breached Queue (SLA Class)
+        matched_rules = [
+            r for r in rules_by_sla.get(q, [])
+            if not r.preferred_colors or c in r.preferred_colors
+        ]
+        all_apps: List[str] = []
+        all_dscps: List[str] = []
+        all_ips: List[str] = []
+        all_lists: List[str] = []
+
+        for r in matched_rules:
+            all_apps.extend(r.apps)
+            all_dscps.extend(r.dscp_values)
+            all_ips.extend(r.ip_prefixes)
+            if r.app_list and not r.app_list.startswith("DSCP("):
+                all_lists.append(r.app_list)
+
+        uniq_apps = list(dict.fromkeys(all_apps))
+        uniq_dscps = list(dict.fromkeys(all_dscps))
+        uniq_ips = list(dict.fromkeys(all_ips))
+        uniq_lists = list(dict.fromkeys(all_lists))
+
+        # Build clean, non-duplicated Application / Traffic description for this Queue
+        if uniq_apps:
+            app_display = ", ".join(uniq_apps[:10]) + (f" (+{len(uniq_apps) - 10} more)" if len(uniq_apps) > 10 else "")
+            if uniq_dscps:
+                app_display += f" | {_classify_dscp_traffic(uniq_dscps)}"
+            match_ref = ", ".join(uniq_lists[:3]) if uniq_lists else "AAR App-List"
+        elif uniq_ips:
+            app_display = f"IP Prefixes: {', '.join(uniq_ips[:5])}"
+            match_ref = ", ".join(uniq_lists[:3]) if uniq_lists else "Data-Prefix-List"
+        elif uniq_dscps:
+            app_display = _classify_dscp_traffic(uniq_dscps)
+            match_ref = f"DSCP Policy ({q})"
+        else:
+            app_display = f"All traffic in {q} (no app-list defined in AAR policy)"
+            match_ref = "Queue-Level SLA"
+
+        app_failovers.append(
+            AppFailoverEntry(
+                sla_class=q,
+                application=app_display,
+                app_list=match_ref,
+                preferred_color=c,
+                moved_to_color=moved_to,
+                start_est=start_str,
+                end_est=end_str,
+                duration_seconds=total_sec,
+                duration_mins=round(total_sec / 60.0, 1),
+                duration_hms=fmt_duration_hms(total_sec),
+                failover_count=len(intervals),
+            )
+        )
+
+    app_failovers.sort(key=lambda x: (-x.duration_seconds, x.sla_class))
 
     # 6. Compute KPIs & Automated Root-Cause Verdict
     worst_key = max(total_out_mins.items(), key=lambda x: x[1]) if total_out_mins else ((("N/A", "N/A", "N/A")), 0.0)

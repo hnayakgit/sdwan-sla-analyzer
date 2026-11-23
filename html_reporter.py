@@ -106,18 +106,19 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
     )
     metrics_html = fig_metrics.to_html(full_html=False, include_plotlyjs=False)
 
-    # 3. Interactive App Failover Chart
+    # 3. Interactive App Failover Chart (by Breached Queue)
     if result.app_failovers:
         fig_app = go.Figure(
             data=go.Bar(
-                x=[a.application for a in result.app_failovers],
+                x=[a.sla_class for a in result.app_failovers],
                 y=[a.duration_mins for a in result.app_failovers],
+                customdata=[a.application for a in result.app_failovers],
                 marker_color="#005073",
-                hovertemplate="<b>%{x}</b><br>Duration on Backup: <b>%{y:.1f} mins</b><extra></extra>",
+                hovertemplate="<b>%{x}</b><br>Applications: %{customdata}<br>Duration on Backup: <b>%{y:.1f} mins</b><extra></extra>",
             )
         )
         fig_app.update_layout(
-            title="Application Failover Duration on Backup Transport (Minutes)",
+            title="Failover Duration on Backup Transport by Breached Queue (Minutes)",
             yaxis_title="Duration (Minutes)",
             height=340,
             margin=dict(l=65, r=30, t=55, b=55),
@@ -127,10 +128,10 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
     else:
         app_chart_html = '<div class="empty-ok">Zero application failover events occurred during this EST window.</div>'
 
-    # App Failover Table Rows
+    # App Failover Table Rows (Queue + Affected Applications side-by-side)
     if result.app_failovers:
         app_rows_html = "".join(
-            f"<tr><td><b>{_esc(a.application)}</b></td><td>{_esc(a.app_list)}</td><td>{_esc(a.sla_class)}</td>"
+            f"<tr><td><b>{_esc(a.sla_class)}</b></td><td><b>{_esc(a.application)}</b></td><td>{_esc(a.app_list)}</td>"
             f"<td>{_esc(a.preferred_color)}</td><td><b>{_esc(a.moved_to_color)}</b></td>"
             f"<td>{_esc(a.start_est)}</td><td>{_esc(a.end_est)}</td>"
             f"<td><b>{a.duration_mins:.1f} m</b> ({_esc(a.duration_hms)})</td><td>{a.failover_count}</td></tr>"
@@ -212,7 +213,7 @@ def generate_html_dashboard(result: AnalysisResult, output_path: str) -> str:
       {app_chart_html}
       <div style="overflow-x:auto;margin-top:14px;">
         <table>
-          <thead><tr><th>Application</th><th>App-List</th><th>Queue (SLA)</th><th>Preferred</th><th>Moved To</th><th>Start (EST)</th><th>End (EST)</th><th>Duration</th><th>Count</th></tr></thead>
+          <thead><tr><th>Queue (SLA)</th><th>Affected Applications / Traffic</th><th>Match Reference</th><th>Preferred</th><th>Moved To</th><th>Start (EST)</th><th>End (EST)</th><th>Duration</th><th>Count</th></tr></thead>
           <tbody>{app_rows_html}</tbody>
         </table>
       </div>

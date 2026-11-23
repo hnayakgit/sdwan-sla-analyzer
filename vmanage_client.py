@@ -118,14 +118,14 @@ class VManageClient:
         except Exception:
             return []
 
-    def get_app_lists(self) -> Dict[str, List[str]]:
-        """Fetch vManage app-list definitions (id and name -> list of application names)."""
-        mapping: Dict[str, List[str]] = {}
+    def get_app_lists(self) -> Dict[str, Tuple[str, List[str]]]:
+        """Fetch vManage app-list definitions (id and name -> (list_name, [application_names]))."""
+        mapping: Dict[str, Tuple[str, List[str]]] = {}
         try:
             items = self.get("/template/policy/list/app").get("data", [])
             for item in items:
                 list_id = item.get("listId")
-                name = item.get("name")
+                name = item.get("name", "App-List")
                 entries = item.get("entries", [])
                 apps = []
                 for entry in entries:
@@ -134,9 +134,9 @@ class VManageClient:
                         apps.append(val)
                 if apps:
                     if name:
-                        mapping[name] = apps
+                        mapping[name] = (name, apps)
                     if list_id:
-                        mapping[list_id] = apps
+                        mapping[list_id] = (name, apps)
         except Exception:
             pass
         return mapping

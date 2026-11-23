@@ -293,27 +293,27 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
                 cell.number_format = "0.0"
             cell.fill = zebra_fill if i % 2 == 1 else white_fill
 
-    # Right summary table: Top App Failovers
-    app_snap_headers = ["Application", "Queue", "Moved To", "Duration"]
+    # Right summary table: Breached Queues & Affected Applications
+    app_snap_headers = ["Queue (SLA)", "Affected Applications / Traffic", "Moved To", "Duration"]
     for c, h in enumerate(app_snap_headers, start=6):
         ws1.cell(17, c, h)
     _style_table_header(ws1, 17, 6, 9, height=26)
 
     if result.app_failovers:
         snap_rows = [
-            (f"{a.application} ({a.app_list})", a.sla_class, a.moved_to_color, fmt_duration_short(a.duration_seconds))
+            (a.sla_class, a.application, a.moved_to_color, fmt_duration_short(a.duration_seconds))
             for a in result.app_failovers[: max(4, len(display_tunnels))]
         ]
     else:
-        snap_rows = [("No Application Failover", "All Queues", "Stayed on Primary", "0m 00s")]
+        snap_rows = [("All Queues", "No Application Failover", "Stayed on Primary", "0m 00s")]
 
     for i, row_vals in enumerate(snap_rows, start=18):
-        ws1.row_dimensions[i].height = 22
+        ws1.row_dimensions[i].height = 24
         for c, val in enumerate(row_vals, start=6):
             cell = ws1.cell(i, c, val)
-            cell.font = bold_font if c == 9 and val != "0m 00s" else regular_font
+            cell.font = bold_font if c in (6, 9) and val != "0m 00s" else regular_font
             cell.border = thin_border
-            cell.alignment = Alignment(horizontal="left" if c == 6 else "center", vertical="center")
+            cell.alignment = Alignment(horizontal="left" if c == 7 else "center", vertical="center", wrap_text=(c == 7))
             cell.fill = zebra_fill if i % 2 == 1 else white_fill
 
     ws1.column_dimensions["A"].width = 28
@@ -321,9 +321,9 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     ws1.column_dimensions["C"].width = 16
     ws1.column_dimensions["D"].width = 15
     ws1.column_dimensions["E"].width = 3.5
-    ws1.column_dimensions["F"].width = 32
-    ws1.column_dimensions["G"].width = 15
-    ws1.column_dimensions["H"].width = 18
+    ws1.column_dimensions["F"].width = 16
+    ws1.column_dimensions["G"].width = 36
+    ws1.column_dimensions["H"].width = 16
     ws1.column_dimensions["I"].width = 15
 
     # ==========================================================================
@@ -549,7 +549,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     ws4.row_dimensions[1].height = 32
 
     headers4 = [
-        "Application", "App-List", "Queue (SLA Class)", "Preferred Color",
+        "Queue (SLA Class)", "Affected Applications / Traffic", "Match Reference", "Preferred Color",
         "Moved To (Backup)", "Failover Start (EST)", "Failover End (EST)",
         "Duration (mins)", "Duration (HH:MM:SS)", "Failover Count"
     ]
@@ -559,9 +559,9 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
 
     if result.app_failovers:
         for idx, a in enumerate(result.app_failovers, start=4):
-            ws4.row_dimensions[idx].height = 22
+            ws4.row_dimensions[idx].height = 26
             vals = [
-                a.application, a.app_list, a.sla_class, a.preferred_color,
+                a.sla_class, a.application, a.app_list, a.preferred_color,
                 a.moved_to_color, a.start_est, a.end_est,
                 a.duration_mins, a.duration_hms, a.failover_count
             ]
@@ -569,7 +569,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
                 cell = ws4.cell(idx, c, v)
                 cell.font = bold_font if c in (1, 8) else regular_font
                 cell.border = thin_border
-                cell.alignment = Alignment(horizontal="left" if c == 1 else "center", vertical="center")
+                cell.alignment = Alignment(horizontal="left" if c == 2 else "center", vertical="center", wrap_text=(c == 2))
                 if c == 8:
                     cell.number_format = "0.0"
                 cell.fill = zebra_fill if idx % 2 == 0 else white_fill
@@ -580,7 +580,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         app_chart = BarChart()
         app_chart.type = "col"
         app_chart.grouping = "clustered"
-        app_chart.title = "Application Failover Duration on Backup Transport (Minutes)"
+        app_chart.title = "Failover Duration on Backup Transport by Breached Queue (Minutes)"
         app_chart.style = 2
         app_chart.legend = None
         app_chart.width = 25
@@ -610,7 +610,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         ws4["A4"].alignment = Alignment(horizontal="center", vertical="center")
         ws4.row_dimensions[4].height = 28
 
-    col_widths_4 = [20, 16, 17, 16, 20, 25, 25, 16, 19, 15]
+    col_widths_4 = [18, 44, 22, 16, 18, 25, 25, 16, 19, 15]
     for c_idx, w in enumerate(col_widths_4, start=1):
         ws4.column_dimensions[get_column_letter(c_idx)].width = w
 
