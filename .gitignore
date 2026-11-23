@@ -1,0 +1,17 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated customer reports (never commit customer data to GitHub)
+output/
+*.xlsx
+*.html
+*.csv
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+.env
