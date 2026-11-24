@@ -7,6 +7,8 @@ Excel Report Generator (Approved v7 EST Executive Layout)
 - Tab 5: Raw SLA & BFD Events (Chronological filterable audit log in EST)
 """
 
+from datetime import datetime
+
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
@@ -348,6 +350,18 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     ws2["A2"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
     ws2.row_dimensions[2].height = 20
 
+    date_headers = [dt.strftime("%Y-%m-%d") for dt in result.bucket_datetimes]
+    ws2.merge_cells("A3:C3")
+    ws2["A3"] = "Date (EST)"
+    ws2["A3"].font = header_font
+    ws2["A3"].fill = blue_fill
+    ws2["A3"].alignment = Alignment(horizontal="center", vertical="center")
+    ws2["A3"].border = thin_border
+    for idx, date_label in enumerate(date_headers, start=4):
+        ws2.cell(3, idx, date_label)
+    ws2.cell(3, last_hm_col, "")
+    _style_table_header(ws2, 3, 4, last_hm_col, height=22)
+
     headers2 = ["Local Color", "Remote Hub IP", "Queue (SLA Class)"] + result.bucket_labels + ["Total Out-of-SLA (mins)"]
     for c, h in enumerate(headers2, start=1):
         ws2.cell(4, c, h)
@@ -407,8 +421,18 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     jit_limit = strict_sla.jitter if strict_sla else 20.0
     strict_name = strict_sla.name if strict_sla else "SLA"
 
-    # Dynamically plot ALL SLA queues (up to 6) so Queue0, Queue1, Queue2, Queue7 all appear on the Executive Summary chart!
-    chart_queues = sla_names[:6] if sla_names else ["Default"]
+    # Keep the Executive chart focused on queues that actually breached.
+    chart_queues = [
+        q for q in (sla_names or ["Default"])
+        if any(
+            pct > 0
+            for (color, rip, queue), pcts in result.heatmap_pct.items()
+            if queue == q
+            for pct in pcts
+        )
+    ][:6]
+    if not chart_queues:
+        chart_queues = ["No SLA Breaches"]
 
     bk_label = backup_color if backup_color else "Backup"
     headers3 = [
@@ -489,28 +513,102 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     chart1_row = max(24, 19 + max(len(display_tunnels), len(snap_rows)) + 2)
     exec_sla_chart = BarChart()
     exec_sla_chart.type = "col"
-    exec_sla_chart.grouping = "clustered"
-    exec_sla_chart.title = f"SLA Outage Timeline Over Time (EST) — % Out-of-SLA per Queue (Hub {result.primary_hub_ip})"
+    chart_days = (
+        (result.bucket_datetimes[-1] - result.bucket_datetimes[0]).total_seconds() / 86400
+        if len(result.bucket_datetimes) > 1 else 0
+    )
+    use_hourly_exec = chart_days >= 6
+    exec_sla_chart.grouping = "stacked" if use_hourly_exec else "clustered"
+    exec_sla_chart.overlap = 100 if use_hourly_exec else 0
+    exec_sla_chart.title = (
+        f"Hourly SLA Outage Duration (EST) — Breached Queues (Hub {result.primary_hub_ip})"
+        if use_hourly_exec else
+        f"15-Minute SLA Outage Profile (EST) — Breached Queues (Hub {result.primary_hub_ip})"
+    )
     exec_sla_chart.y_axis.scaling.min = 0
-    exec_sla_chart.y_axis.scaling.max = 100
-    max_q_col = 11 + len(chart_queues)
-    exec_sla_chart.add_data(Reference(ws3, min_col=12, min_row=3, max_col=max_q_col, max_row=last_data_row), titles_from_data=True)
-    exec_sla_chart.set_categories(Reference(ws3, min_col=1, min_row=4, max_row=last_data_row))
+    if use_hourly_exec:
+        hourly = {}
+        for i, dt in enumerate(result.bucket_datetimes):
+            hour_key = dt.replace(minute=0, second=0, microsecond=0)
+            values = hourly.setdefault(hour_key, [0.0] * len(chart_queues))
+            for q_idx, queue in enumerate(chart_queues):
+                queue_pcts = result.heatmap_pct.get((primary_color, result.primary_hub_ip, queue), [])
+                if i < len(queue_pcts):
+                    values[q_idx] += queue_pcts[i] / 100.0 * 15.0
+        source_col = 11
+        ws1.cell(1, source_col, "Hour (EST)")
+        for q_idx, queue in enumerate(chart_queues, start=1):
+            ws1.cell(1, source_col + q_idx, queue)
+        for row_idx, (hour_key, values) in enumerate(sorted(hourly.items()), start=2):
+            ws1.cell(row_idx, source_col, hour_key.strftime("%Y-%m-%d %H:%M"))
+            for q_idx, value in enumerate(values, start=1):
+                ws1.cell(row_idx, source_col + q_idx, round(value, 2))
+        source_end = 1 + len(hourly)
+        exec_sla_chart.add_data(
+            Reference(ws1, min_col=source_col + 1, min_row=1,
+                      max_col=source_col + len(chart_queues), max_row=source_end),
+            titles_from_data=True,
+        )
+        exec_sla_chart.set_categories(Reference(ws1, min_col=source_col, min_row=2, max_row=source_end))
+        exec_sla_chart.y_axis.title = "Outage Duration (minutes)"
+        for col_idx in range(source_col, source_col + len(chart_queues) + 1):
+            ws1.column_dimensions[get_column_letter(col_idx)].hidden = True
+    elif chart_queues[0] != "No SLA Breaches":
+        max_q_col = 11 + len(chart_queues)
+        exec_sla_chart.add_data(Reference(ws3, min_col=12, min_row=3, max_col=max_q_col, max_row=last_data_row), titles_from_data=True)
+        exec_sla_chart.set_categories(Reference(ws3, min_col=1, min_row=4, max_row=last_data_row))
+        exec_sla_chart.y_axis.title = "Out-of-SLA (%)"
+        exec_sla_chart.y_axis.scaling.max = 100
+    else:
+        exec_sla_chart.y_axis.title = "Out-of-SLA (%)"
+        exec_sla_chart.y_axis.scaling.max = 100
     queue_palette = ["D93025", "E67C00", "005073", "7B1FA2", "007A87", "2E7D32"]
     for idx_s, s in enumerate(exec_sla_chart.series):
         s.graphicalProperties.solidFill = queue_palette[idx_s % len(queue_palette)]
-    _configure_time_chart(exec_sla_chart, y_title="% Time Out of SLA", tick_skip=tick_skip, show_legend=True)
+    _configure_time_chart(exec_sla_chart, y_title=exec_sla_chart.y_axis.title, tick_skip=tick_skip, show_legend=True)
     ws1.add_chart(exec_sla_chart, f"A{chart1_row}")
 
     # TAB 3 CHARTS: Latency & Jitter with clean EST baseline
     chart3_start = last_data_row + 3
+    metric_source_col = len(headers3) + 3
+    if use_hourly_exec:
+        metric_hourly = {}
+        for i, dt in enumerate(result.bucket_datetimes):
+            hour_key = dt.replace(minute=0, second=0, microsecond=0)
+            bucket = metric_hourly.setdefault(hour_key, [])
+            pm = p_metrics[i] if i < len(p_metrics) else {}
+            bm = b_metrics[i] if i < len(b_metrics) else {}
+            bucket.append((pm, bm))
+        metric_headers = ["Hour (EST)", "Primary Avg Latency", "Backup Avg Latency", "Latency Limit", "Primary Avg Jitter", "Backup Avg Jitter", "Jitter Limit"]
+        for col_idx, header in enumerate(metric_headers, start=metric_source_col):
+            ws3.cell(1, col_idx, header)
+            ws3.column_dimensions[get_column_letter(col_idx)].hidden = True
+        for row_idx, (hour_key, samples) in enumerate(sorted(metric_hourly.items()), start=2):
+            ws3.cell(row_idx, metric_source_col, hour_key.strftime("%Y-%m-%d %H:%M"))
+            primary_lat = [s[0].get("avg_latency", 0.0) for s in samples]
+            backup_lat = [s[1].get("avg_latency", 0.0) for s in samples]
+            primary_jit = [s[0].get("avg_jitter", 0.0) for s in samples]
+            backup_jit = [s[1].get("avg_jitter", 0.0) for s in samples]
+            vals = [
+                sum(primary_lat) / len(primary_lat), sum(backup_lat) / len(backup_lat), lat_limit,
+                sum(primary_jit) / len(primary_jit), sum(backup_jit) / len(backup_jit), jit_limit,
+            ]
+            for col_offset, value in enumerate(vals, start=1):
+                ws3.cell(row_idx, metric_source_col + col_offset, round(value, 2))
+        metric_source_end = 1 + len(metric_hourly)
+
     lat_chart = LineChart()
     lat_chart.title = f"15-Min Average Latency (ms) Over Time (EST) — {primary_color} vs {bk_label}"
     lat_chart.y_axis.scaling.min = 0
     lat_chart.y_axis.scaling.max = int(max_lat_seen * 1.25) + 10
-    lat_chart.add_data(Reference(ws3, min_col=5, min_row=3, max_col=6, max_row=last_data_row), titles_from_data=True)
-    lat_chart.add_data(Reference(ws3, min_col=10, min_row=3, max_col=10, max_row=last_data_row), titles_from_data=True)
-    lat_chart.set_categories(Reference(ws3, min_col=1, min_row=4, max_row=last_data_row))
+    if use_hourly_exec:
+        lat_chart.add_data(Reference(ws3, min_col=metric_source_col + 1, min_row=1, max_col=metric_source_col + 2, max_row=metric_source_end), titles_from_data=True)
+        lat_chart.add_data(Reference(ws3, min_col=metric_source_col + 3, min_row=1, max_col=metric_source_col + 3, max_row=metric_source_end), titles_from_data=True)
+        lat_chart.set_categories(Reference(ws3, min_col=metric_source_col, min_row=2, max_row=metric_source_end))
+    else:
+        lat_chart.add_data(Reference(ws3, min_col=5, min_row=3, max_col=6, max_row=last_data_row), titles_from_data=True)
+        lat_chart.add_data(Reference(ws3, min_col=10, min_row=3, max_col=10, max_row=last_data_row), titles_from_data=True)
+        lat_chart.set_categories(Reference(ws3, min_col=1, min_row=4, max_row=last_data_row))
     _style_line_series(lat_chart.series[0], "D93025")
     _style_line_series(lat_chart.series[1], "005073")
     _style_line_series(lat_chart.series[2], "E67C00", dashed=True, width_emu=20000)
@@ -521,9 +619,14 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     jit_chart.title = f"15-Min Average Jitter (ms) Over Time (EST) — {primary_color} vs {bk_label}"
     jit_chart.y_axis.scaling.min = 0
     jit_chart.y_axis.scaling.max = int(max_jit_seen * 1.25) + 5
-    jit_chart.add_data(Reference(ws3, min_col=7, min_row=3, max_col=8, max_row=last_data_row), titles_from_data=True)
-    jit_chart.add_data(Reference(ws3, min_col=11, min_row=3, max_col=11, max_row=last_data_row), titles_from_data=True)
-    jit_chart.set_categories(Reference(ws3, min_col=1, min_row=4, max_row=last_data_row))
+    if use_hourly_exec:
+        jit_chart.add_data(Reference(ws3, min_col=metric_source_col + 4, min_row=1, max_col=metric_source_col + 5, max_row=metric_source_end), titles_from_data=True)
+        jit_chart.add_data(Reference(ws3, min_col=metric_source_col + 6, min_row=1, max_col=metric_source_col + 6, max_row=metric_source_end), titles_from_data=True)
+        jit_chart.set_categories(Reference(ws3, min_col=metric_source_col, min_row=2, max_row=metric_source_end))
+    else:
+        jit_chart.add_data(Reference(ws3, min_col=7, min_row=3, max_col=8, max_row=last_data_row), titles_from_data=True)
+        jit_chart.add_data(Reference(ws3, min_col=11, min_row=3, max_col=11, max_row=last_data_row), titles_from_data=True)
+        jit_chart.set_categories(Reference(ws3, min_col=1, min_row=4, max_row=last_data_row))
     _style_line_series(jit_chart.series[0], "D93025")
     _style_line_series(jit_chart.series[1], "005073")
     _style_line_series(jit_chart.series[2], "E67C00", dashed=True, width_emu=20000)
@@ -575,7 +678,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         app_chart = BarChart()
         app_chart.type = "col"
         app_chart.grouping = "clustered"
-        app_chart.title = "Failover Duration on Backup Transport by Breached Queue (Minutes)"
+        app_chart.title = "Failover Duration by Breached Queue (Minutes)"
         app_chart.style = 2
         app_chart.legend = None
         app_chart.width = 25
@@ -654,6 +757,23 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     ws5["A1"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
     ws5.row_dimensions[1].height = 32
 
+    ws5["I3"] = "Event Summary"
+    ws5["I3"].font = section_font
+    ws5["I4"] = "Total Events"
+    ws5["J4"] = len(result.raw_events)
+    ws5["I5"] = "SLA Breaches"
+    ws5["J5"] = sum(1 for ev in result.raw_events if ev.severity == "BREACH")
+    ws5["I6"] = "BFD Down Events"
+    ws5["J6"] = sum(1 for ev in result.raw_events if ev.severity == "BFD_DOWN")
+    ws5["I7"] = "Recoveries"
+    ws5["J7"] = sum(1 for ev in result.raw_events if ev.severity == "RECOVERED")
+    for row in range(4, 8):
+        for col in range(9, 11):
+            ws5.cell(row, col).border = thin_border
+            ws5.cell(row, col).fill = zebra_fill if row % 2 == 0 else white_fill
+            ws5.cell(row, col).alignment = Alignment(horizontal="center", vertical="center")
+        ws5.cell(row, 9).font = bold_font
+
     headers5 = ["Timestamp (EST)", "Event Type", "Local Color", "Remote Hub IP", "Old SLA Classes", "New SLA Classes", "Impact Summary"]
     for c, h in enumerate(headers5, start=1):
         ws5.cell(3, c, h)
@@ -681,6 +801,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
                 else:
                     cell.fill = zebra_fill if idx % 2 == 0 else white_fill
         ws5.auto_filter.ref = f"A3:G{3 + len(result.raw_events)}"
+        ws5.freeze_panes = "A4"
     else:
         ws5.merge_cells("A4:G4")
         ws5["A4"] = "Zero SLA-change or BFD state-change events recorded during this window."
@@ -720,7 +841,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     wan_sum_headers = [
         "WAN Interface", "Transport Color", "Link Speed (Mbps)",
         "Peak Tx (Mbps)", "Peak Rx (Mbps)", "Peak Util (%)",
-        "Total Errors", "Total Drops", "Diagnosis"
+        "Cumulative Errors", "Cumulative Drops", "Diagnosis"
     ]
     for c, h in enumerate(wan_sum_headers, start=1):
         ws6.cell(5, c, h)
@@ -822,6 +943,119 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     col_widths_6 = [24, 16, 18, 16, 16, 15, 14, 14, 42]
     for c_idx, w in enumerate(col_widths_6, start=1):
         ws6.column_dimensions[get_column_letter(c_idx)].width = w
+
+    # ======================================================================
+    # TAB 7: TLOC & SUBINTERFACE PERFORMANCE
+    # ======================================================================
+    ws7 = wb.create_sheet("TLOC & Subinterface Performance")
+    ws7.views.sheetView[0].showGridLines = True
+    ws7.merge_cells("A1:H1")
+    ws7["A1"] = "Active TLOC and Subinterface Performance (EST)"
+    ws7["A1"].font = title_font
+    ws7["A1"].fill = navy_fill
+    ws7["A1"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws7.row_dimensions[1].height = 32
+    ws7.merge_cells("A2:H2")
+    ws7["A2"] = "Subinterface rows are limited to interfaces with an active transport color; TLOC loss remains keyed by local color and remote hub."
+    ws7["A2"].font = subtitle_font
+    ws7["A2"].fill = navy_fill
+    ws7["A2"].alignment = Alignment(horizontal="left", vertical="center", indent=1, wrap_text=True)
+    ws7.row_dimensions[2].height = 30
+
+    active_colors = set(result.colors)
+    subinterfaces = [
+        w_if for w_if in result.wan_interfaces
+        if "." in w_if.ifname and w_if.color in active_colors
+    ]
+    ws7["A4"] = "Active-TLOC Subinterface Utilization"
+    ws7["A4"].font = section_font
+    sub_headers = [
+        "Subinterface", "TLOC Color", "Link Speed (Mbps)", "Peak Tx (Mbps)",
+        "Peak Rx (Mbps)", "Peak Utilization (%)", "Cumulative Errors", "Cumulative Drops"
+    ]
+    for c, h in enumerate(sub_headers, start=1):
+        ws7.cell(5, c, h)
+    _style_table_header(ws7, 5, 1, len(sub_headers), height=30)
+    if subinterfaces:
+        for row_idx, w_if in enumerate(subinterfaces, start=6):
+            vals = [
+                w_if.ifname, w_if.color, w_if.speed_mbps if w_if.speed_mbps > 0 else "N/A",
+                w_if.peak_tx_mbps, w_if.peak_rx_mbps, w_if.peak_util_pct,
+                w_if.total_errors, w_if.total_drops,
+            ]
+            for col_idx, value in enumerate(vals, start=1):
+                cell = ws7.cell(row_idx, col_idx, value)
+                cell.border = thin_border
+                cell.fill = zebra_fill if row_idx % 2 == 0 else white_fill
+                cell.font = bold_font if col_idx == 1 else regular_font
+                cell.alignment = Alignment(horizontal="left" if col_idx in (1, 2) else "center", vertical="center")
+                if col_idx in (4, 5):
+                    cell.number_format = "0.00"
+                elif col_idx == 6:
+                    cell.number_format = '0.0"%"'
+    else:
+        ws7.merge_cells("A6:H6")
+        ws7["A6"] = "No active-TLOC subinterfaces were available in the vManage response."
+        ws7["A6"].font = Font(name="Calibri", size=10, italic=True, color=MUTED_TXT)
+        ws7["A6"].alignment = Alignment(horizontal="left", vertical="center")
+
+    tloc_start = max(9, 7 + len(subinterfaces))
+    ws7.cell(tloc_start, 1, "TLOC Loss by Local Color and Remote Hub").font = section_font
+    tloc_headers = [
+        "Local Color", "Remote Hub IP", "Average Loss (%)", "Maximum Loss (%)",
+        "Loss Breach Count", "Breach Duration (mins)", "Threshold (%)", "Status"
+    ]
+    for c, h in enumerate(tloc_headers, start=1):
+        ws7.cell(tloc_start + 1, c, h)
+    _style_table_header(ws7, tloc_start + 1, 1, len(tloc_headers), height=30)
+    strict_loss = loss_limit
+    tloc_row = tloc_start + 2
+    for color, rip in result.tunnels:
+        metrics = result.tunnel_metrics.get((color, rip), [])
+        losses = [float(m.get("avg_loss", 0.0)) for m in metrics]
+        if not losses:
+            continue
+        breach_count = sum(1 for loss in losses if loss > strict_loss)
+        avg_loss = sum(losses) / len(losses)
+        max_loss = max(losses)
+        vals = [
+            color, rip, round(avg_loss, 2), round(max_loss, 2), breach_count,
+            breach_count * 15, strict_loss, "BREACH" if breach_count else "Healthy",
+        ]
+        for col_idx, value in enumerate(vals, start=1):
+            cell = ws7.cell(tloc_row, col_idx, value)
+            cell.border = thin_border
+            cell.fill = red_fill if col_idx == 8 and value == "BREACH" else (zebra_fill if tloc_row % 2 == 0 else white_fill)
+            cell.font = Font(name="Calibri", size=10, bold=col_idx in (1, 8), color=RED_TXT if value == "BREACH" else DARK_TXT)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            if col_idx in (3, 4, 7):
+                cell.number_format = '0.00"%"'
+        tloc_row += 1
+
+    mapped_colors = {w_if.color for w_if in subinterfaces}
+    unmapped = [(color, rip) for color, rip in result.tunnels if color not in mapped_colors]
+    unmapped_row = tloc_row + 2
+    ws7.cell(unmapped_row, 1, "TLOCs Without a Reliable Subinterface Mapping").font = section_font
+    ws7.cell(unmapped_row + 1, 1, "Local Color").font = header_font
+    ws7.cell(unmapped_row + 1, 1).fill = blue_fill
+    ws7.cell(unmapped_row + 1, 2, "Remote Hub IP").font = header_font
+    ws7.cell(unmapped_row + 1, 2).fill = blue_fill
+    for col_idx in (1, 2):
+        ws7.cell(unmapped_row + 1, col_idx).border = thin_border
+    for row_idx, (color, rip) in enumerate(unmapped, start=unmapped_row + 2):
+        ws7.cell(row_idx, 1, color)
+        ws7.cell(row_idx, 2, rip)
+        for col_idx in (1, 2):
+            ws7.cell(row_idx, col_idx).border = thin_border
+            ws7.cell(row_idx, col_idx).fill = zebra_fill if row_idx % 2 == 0 else white_fill
+    if not unmapped:
+        ws7.merge_cells(start_row=unmapped_row + 2, start_column=1, end_row=unmapped_row + 2, end_column=2)
+        ws7.cell(unmapped_row + 2, 1, "All active TLOC colors have an available subinterface mapping.")
+        ws7.cell(unmapped_row + 2, 1).font = Font(name="Calibri", size=10, italic=True, color=MUTED_TXT)
+
+    for col_idx, width in enumerate([20, 16, 18, 16, 16, 22, 20, 20], start=1):
+        ws7.column_dimensions[get_column_letter(col_idx)].width = width
+    ws7.freeze_panes = "A6"
 
     wb.save(output_path)
     return output_path

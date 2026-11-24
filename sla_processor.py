@@ -882,8 +882,6 @@ def analyze_sla_data(
         # Build clean, non-duplicated Application / Traffic description for this Queue
         if uniq_apps:
             app_display = ", ".join(uniq_apps[:10]) + (f" (+{len(uniq_apps) - 10} more)" if len(uniq_apps) > 10 else "")
-            if uniq_dscps:
-                app_display += f" | {_classify_dscp_traffic(uniq_dscps)}"
             match_ref = ", ".join(uniq_lists[:3]) if uniq_lists else "AAR Policy + DPI"
         elif uniq_ips:
             app_display = f"IP Prefixes: {', '.join(uniq_ips[:5])}"
