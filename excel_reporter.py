@@ -513,6 +513,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     chart1_row = max(24, 19 + max(len(display_tunnels), len(snap_rows)) + 2)
     exec_sla_chart = BarChart()
     exec_sla_chart.type = "col"
+    exec_sla_chart.visible_cells_only = False
     chart_days = (
         (result.bucket_datetimes[-1] - result.bucket_datetimes[0]).total_seconds() / 86400
         if len(result.bucket_datetimes) > 1 else 0
@@ -566,7 +567,15 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     for idx_s, s in enumerate(exec_sla_chart.series):
         s.graphicalProperties.solidFill = queue_palette[idx_s % len(queue_palette)]
     _configure_time_chart(exec_sla_chart, y_title=exec_sla_chart.y_axis.title, tick_skip=tick_skip, show_legend=True)
-    ws1.add_chart(exec_sla_chart, f"A{chart1_row}")
+    if chart_queues == ["No SLA Breaches"]:
+        ws1.merge_cells(start_row=chart1_row, start_column=1, end_row=chart1_row, end_column=9)
+        message = ws1.cell(chart1_row, 1, "No SLA breaches detected in the selected time window.")
+        message.font = Font(name="Calibri", size=11, bold=True, color=GREEN_TXT)
+        message.fill = green_fill
+        message.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws1.row_dimensions[chart1_row].height = 30
+    else:
+        ws1.add_chart(exec_sla_chart, f"A{chart1_row}")
 
     # TAB 3 CHARTS: Latency & Jitter with clean EST baseline
     chart3_start = last_data_row + 3
@@ -598,6 +607,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
         metric_source_end = 1 + len(metric_hourly)
 
     lat_chart = LineChart()
+    lat_chart.visible_cells_only = False
     lat_chart.title = f"15-Min Average Latency (ms) Over Time (EST) — {primary_color} vs {bk_label}"
     lat_chart.y_axis.scaling.min = 0
     lat_chart.y_axis.scaling.max = int(max_lat_seen * 1.25) + 10
@@ -616,6 +626,7 @@ def generate_excel_report(result: AnalysisResult, output_path: str) -> str:
     ws3.add_chart(lat_chart, f"A{chart3_start}")
 
     jit_chart = LineChart()
+    jit_chart.visible_cells_only = False
     jit_chart.title = f"15-Min Average Jitter (ms) Over Time (EST) — {primary_color} vs {bk_label}"
     jit_chart.y_axis.scaling.min = 0
     jit_chart.y_axis.scaling.max = int(max_jit_seen * 1.25) + 5
