@@ -24,9 +24,17 @@ Instead of digging through thousands of raw `sla-change` events in vManage, engi
 
 ## Prerequisites
 
-- **Python 3.9+** (macOS, Linux, or Windows)
+- **Python 3.9 or newer**
 - Network reachability from your workstation/jumpbox to **vManage HTTPS (443)**
-- Read-only (or operator) vManage API credentials
+- Read-only vManage API credentials (recommended)
+- Terminal access: Terminal on macOS, PowerShell or Command Prompt on Windows
+
+This tool is **read-only for vManage and the end device**. It retrieves monitoring data and writes reports locally. It does not configure, deploy, reboot, commit, or run CLI commands on a device.
+
+Repository links:
+
+- Public: https://github.com/hnayakgit/sdwan-sla-analyzer
+- Private: https://github.com/hanayak_cisco/sdwan-sla-analyzer
 
 ---
 
@@ -38,38 +46,74 @@ git clone https://github.com/hnayakgit/sdwan-sla-analyzer.git
 cd sdwan-sla-analyzer
 ```
 
+Use the private repository URL instead if your organization requires it:
+
+```bash
+git clone https://github.com/hanayak_cisco/sdwan-sla-analyzer.git
+cd sdwan-sla-analyzer
+```
+
 ### 2. Create a Virtual Environment & Install Dependencies
 
-**macOS / Linux:**
+**macOS:**
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 **Windows (PowerShell):**
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
+
+If PowerShell blocks activation, run PowerShell as your normal user and execute this once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Then activate the environment again.
 
 **Windows (Command Prompt / `cmd`):**
 ```cmd
 python -m venv venv
 venv\Scripts\activate.bat
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-*(If you use `uv`, you can also run directly with `uv run --with-requirements requirements.txt python3 sla_analyzer.py`.)*
+After activation, your prompt normally shows `(venv)`.
 
 ---
 
 ## Step-by-Step Usage Guide for Engineers
 
 ### 1. Run the Script (On-Demand)
+
+**macOS:**
 ```bash
 python3 sla_analyzer.py
+```
+
+**Windows PowerShell:**
+```powershell
+python sla_analyzer.py
+```
+
+**Windows Command Prompt:**
+```cmd
+python sla_analyzer.py
+```
+
+If the `python` command is not found on Windows, try `py` instead:
+
+```powershell
+py sla_analyzer.py
 ```
 
 ### 2. Enter the Interactive Prompts
@@ -84,19 +128,29 @@ The script will ask for:
    - `[4]` Last 24 hours
    - `[5]` Last 1 week (7 days)
 
+Recommended checks:
+
+- Use **`[2] Last 4 hours`** for a quick validation run.
+- Use **`[5] Last 1 week (7 days)`** for the full production report.
+- Enter the exact cEdge **System IP**, not a WAN interface IP or hostname.
+
 > **Self-Signed Certificate Prompt:** If your vManage uses an internal/self-signed HTTPS certificate, the script will pause and ask: `Continue without SSL verification? [y/N]`. Type `y` to proceed.
 
 ### 3. Review the Generated Reports
 Reports are automatically saved in a timestamped folder under `output/`:
 ```text
 output/<hostname>_<system-ip>_<YYYYMMDD_HHMMSS_EST>/
-├── SLA_Report_<hostname>_<system-ip>.xlsx      # Customer-ready 5-tab Excel workbook
+├── SLA_Report_<hostname>_<system-ip>.xlsx      # Customer-ready Excel workbook
 └── SLA_Dashboard_<hostname>_<system-ip>.html   # Interactive browser dashboard
 ```
+
+Open the `.xlsx` file in Microsoft Excel or LibreOffice. Open the `.html` file in a browser.
 
 ---
 
 ## Understanding the Output Tabs
+
+The Excel workbook contains **seven tabs**. The first tab is the quick executive view; the remaining tabs provide supporting detail.
 
 | Tab / Section | Purpose |
 | :--- | :--- |
@@ -106,18 +160,59 @@ output/<hostname>_<system-ip>_<YYYYMMDD_HHMMSS_EST>/
 | **4. App Failover Summary** | Correlates the device's AAR policy with `sla-change` events to list which **Applications / App-Lists** moved from primary to backup transport, exact EST start/end times, and total duration. |
 | **5. Raw SLA & BFD Events** | Filterable chronological audit log of every `sla-change` and `bfd-state-change` event in EST. |
 | **6. WAN Utilization & Errors** | 15-minute VPN 0 WAN interface Tx/Rx Mbps, link utilization %, interface errors & drops, and automated diagnosis distinguishing **ISP/Carrier Transport Issue** vs. **High Utilization/Congestion** vs. **Local Link Errors**. |
+| **7. TLOC & Subinterface Performance** | Active-color subinterface utilization, TLOC loss by local color and remote hub, loss thresholds, and items without a reliable subinterface mapping. |
 
 ---
 
 ## Offline Demo Mode (Test Without vManage)
 Engineers can test the tool and preview the Excel + HTML outputs anytime without connecting to a live vManage:
+**macOS / Linux:**
 ```bash
 python3 sla_analyzer.py --demo
 ```
 
+**Windows:**
+```powershell
+python sla_analyzer.py --demo
+```
+
+Demo mode does not contact vManage. It creates sample Excel and HTML reports so you can verify the installation first.
+
+## Troubleshooting
+
+### `python` or `python3` is not found
+
+Install Python 3.9+ from https://www.python.org/downloads/ and enable the option to add Python to `PATH` on Windows. Close and reopen the terminal after installation.
+
+### `No module named ...`
+
+Activate the virtual environment and reinstall dependencies:
+
+**macOS:**
+```bash
+source venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+**Windows PowerShell:**
+```powershell
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+### SSL certificate warning
+
+The script tries verified HTTPS first. If your controller uses an internal or self-signed certificate, it will ask whether to continue without certificate verification. Confirm this only when you recognize the vManage controller.
+
+### No data or device not found
+
+Verify the vManage address, credentials, controller overlay, target cEdge System IP, and HTTPS reachability on port 443. The account must be able to read device monitoring and policy data.
+
 ---
 
-## Security & Best Practices
+## Read-Only Safety and Best Practices
 - Credentials are **never stored** on disk or logged.
 - The `.gitignore` file excludes `output/`, `*.xlsx`, and `*.html` so customer telemetry is never accidentally committed to Git.
 - The tool always calls `/logout` on vManage when finished (even if interrupted with `Ctrl+C`).
+- Use a read-only vManage account whenever possible.
+- Treat generated Excel and HTML files as customer data and share them only through approved channels.
